@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -e
 
@@ -59,7 +58,7 @@ phoenix_banner='
 '
 
 flash_banner() {
-  clear
+  clear 2>/dev/null || true
   echo -e "${MAGENTA}${phoenix_banner}${RESET}"
   echo
   echo -e "${YELLOW}This script was originally called tlogger${RESET}"
@@ -122,26 +121,27 @@ install() {
     exit 0
   fi
 
+  # Check before appending: the block's own comments mention these names.
+  THEME_DETECTED=0
+  if grep -qE 'powerlevel10k|powerlevel9k|starship|spaceship|oh-my-zsh|ZSH_THEME' "$ZSHRC" 2>/dev/null; then
+    THEME_DETECTED=1
+  fi
+
   cat >> "$ZSHRC" <<EOF
 
 ### TLOGGER FINAL CLEAN START ###
 
 export DISABLE_AUTO_TITLE=true
-setopt promptsubst
 export TLOGGER_AUTOSTART=$AUTOSTART
 
 tun0_ip() {
   ip -4 addr show tun0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1
 }
 
-# Remember whatever prompt was already configured, so a theme is not
-# clobbered while logging is off and can be handed back on stop.
-TLOGGER_ORIG_PROMPT="\$PROMPT"
-
-configure_prompt() {
-  [[ -n "\$TLOGGER_ACTIVE" ]] || return
-  PROMPT=\$'%F{blue}┌──%f(%F{red}%n%f㉿%F{green}%m%f)-[%F{cyan}%~%f] [%F{yellow}\$(TZ=UTC date "+%Y-%m-%d %H:%M:%S UTC")%f] [%F{magenta}tun0:\$(tun0_ip)%f]\\n%F{blue}└─%f$ '
-}
+# The prompt is deliberately left alone. Prompt frameworks such as
+# powerlevel10k re-render asynchronously and will fight any takeover; the
+# per-command log header already records user, host, cwd, UTC time and the
+# tun0 address, so nothing is lost by staying out of the way.
 
 tlogger_capture_exit() {
   TLOGGER_LAST_EXIT=\$?
@@ -198,7 +198,6 @@ tlogger_stop() {
   [[ -z "\$TLOGGER_ACTIVE" ]] && return
   unset TLOGGER_ACTIVE
   export TLOGGER_PAUSED=1
-  [[ -n "\$TLOGGER_ORIG_PROMPT" ]] && PROMPT="\$TLOGGER_ORIG_PROMPT"
   exec >/dev/tty 2>&1
   echo "[+] Logging stopped"
 }
@@ -244,6 +243,56 @@ tlogger_mode() {
       local _cur="manual"
       [[ "\$TLOGGER_AUTOSTART" -eq 1 ]] && _cur="automatic"
       echo "usage: tlogger_mode auto|manual  (current: \$_cur)"
+      ;;
+  esac
+}
+
+_tlogger_persist_pty_cmds() {
+  local _zshrc="\$HOME/.zshrc"
+  [[ -f "\$_zshrc" ]] || return
+  grep -q '^TLOGGER_PTY_CMDS=(' "\$_zshrc" || return
+  sed -i "s|^TLOGGER_PTY_CMDS=(.*)\$|TLOGGER_PTY_CMDS=(\$TLOGGER_PTY_CMDS)|" "\$_zshrc" \
+    && echo "[tlogger] saved — other open terminals pick this up on restart"
+}
+
+tlogger_pty() {
+  local _c
+  case "\$1" in
+    add)
+      shift
+      [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty add <cmd>..."; return 1; }
+      for _c in "\$@"; do
+        if (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
+          echo "[tlogger] \$_c is already captured"
+          continue
+        fi
+        TLOGGER_PTY_CMDS+=("\$_c")
+        alias "\$_c"="_tlogger_pty_run \$_c"
+        echo "[tlogger] \$_c is now captured through a pty"
+      done
+      _tlogger_persist_pty_cmds
+      ;;
+    remove|rm)
+      shift
+      [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty remove <cmd>..."; return 1; }
+      for _c in "\$@"; do
+        if (( ! \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
+          echo "[tlogger] \$_c is not in the list"
+          continue
+        fi
+        TLOGGER_PTY_CMDS=("\${(@)TLOGGER_PTY_CMDS:#\$_c}")
+        unalias "\$_c" 2>/dev/null
+        echo "[tlogger] \$_c is no longer captured"
+      done
+      _tlogger_persist_pty_cmds
+      ;;
+    ''|list)
+      echo "[tlogger] captured through a pty: \$TLOGGER_PTY_CMDS"
+      echo "          add more with: tlogger_pty add <cmd>..."
+      ;;
+    *)
+      echo "usage: tlogger_pty [list|add <cmd>...|remove <cmd>...]"
+      return 1
       ;;
   esac
 }
@@ -333,12 +382,20 @@ tlogger_precmd() {
 
 add-zsh-hook preexec tlogger_preexec
 add-zsh-hook precmd tlogger_precmd
-# after tlogger_precmd, so the prompt reflects logging state set this cycle
-add-zsh-hook precmd configure_prompt
 
 ### TLOGGER FINAL CLEAN END ###
 
 EOF
+
+  if [ "$THEME_DETECTED" -eq 1 ]; then
+    echo -e "${CYAN}[i] A prompt framework was detected in your .zshrc.${RESET}"
+    echo -e "    TLOGGER leaves your prompt alone — it will look exactly as it did"
+    echo -e "    before. Every log entry still records user, host, cwd, UTC time and"
+    echo -e "    the tun0 address in its header, so nothing is missing from the log."
+    echo -e "    To also see the VPN address on screen, add it as a segment in your"
+    echo -e "    own theme's configuration."
+    echo
+  fi
 
   print_usage
 }

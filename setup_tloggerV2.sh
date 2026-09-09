@@ -281,7 +281,7 @@ tlogger_pty() {
           continue
         fi
         TLOGGER_PTY_CMDS+=("\$_c")
-        alias "\$_c"="_tlogger_pty_run \$_c"
+        _tlogger_pty_alias "\$_c"
         echo "[tlogger] \$_c is now captured through a pty"
       done
       _tlogger_persist_pty_cmds
@@ -295,7 +295,12 @@ tlogger_pty() {
           continue
         fi
         TLOGGER_PTY_CMDS=("\${(@)TLOGGER_PTY_CMDS:#\$_c}")
-        unalias "\$_c" 2>/dev/null
+        if [[ -n "\${TLOGGER_PTY_ORIG[\$_c]}" ]]; then
+          alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
+          unset "TLOGGER_PTY_ORIG[\$_c]"
+        else
+          unalias "\$_c" 2>/dev/null
+        fi
         echo "[tlogger] \$_c is no longer captured"
       done
       _tlogger_persist_pty_cmds
@@ -319,22 +324,36 @@ tlogger_grep() {
   grep -n --color=auto -H -- "\$@" "\$HOME"/Desktop/logs/session_*_UTC.log 2>/dev/null
 }
 
+# Taking over a command name would silently drop an alias the user already
+# had - Kali ships "ls --color=auto" - so remember it and keep using it.
+typeset -gA TLOGGER_PTY_ORIG
+
+_tlogger_pty_alias() {
+  local _c="\$1"
+  [[ -n "\${aliases[\$_c]}" && -z "\${TLOGGER_PTY_ORIG[\$_c]}" ]] \
+    && TLOGGER_PTY_ORIG[\$_c]="\${aliases[\$_c]}"
+  alias "\$_c"="_tlogger_pty_run \$_c"
+}
+
 _tlogger_pty_run() {
   local _tlogger_cmd="\$1"
   shift
+  local _tlogger_real="\${TLOGGER_PTY_ORIG[\$_tlogger_cmd]:-command \$_tlogger_cmd}"
+  local -a _tlogger_argv
+  _tlogger_argv=(\${(z)_tlogger_real})
   if [[ -z "\$TLOGGER_ACTIVE" ]] || [[ ! -t 0 ]] || [[ ! -t 1 ]] \
      || ! command -v script >/dev/null 2>&1; then
-    command "\$_tlogger_cmd" "\$@"
+    "\${_tlogger_argv[@]}" "\$@"
     return \$?
   fi
   local _tlogger_tmp
   _tlogger_tmp="\$(mktemp -t tlogger_pty.XXXXXX)" || {
-    command "\$_tlogger_cmd" "\$@"
+    "\${_tlogger_argv[@]}" "\$@"
     return \$?
   }
   local _tlogger_rc=0
   {
-    script -qe -c "command \$_tlogger_cmd \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
+    script -qe -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
     _tlogger_rc=\$?
     [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
   } always {
@@ -344,7 +363,7 @@ _tlogger_pty_run() {
 }
 
 for _tlogger_pc in \$TLOGGER_PTY_CMDS; do
-  alias "\$_tlogger_pc"="_tlogger_pty_run \$_tlogger_pc"
+  _tlogger_pty_alias "\$_tlogger_pc"
 done
 unset _tlogger_pc
 

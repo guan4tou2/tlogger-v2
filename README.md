@@ -2,6 +2,8 @@
 
 A zsh terminal session logger built for OSCP / penetration testing exam documentation. Every command you run — with a timestamp, working directory, and your VPN (`tun0`) IP — gets written to a clean, timestamped log file, so you can rebuild your attack timeline when writing the report instead of relying on memory or screenshots.
 
+**Target environment: Kali Linux.** It assumes zsh, GNU sed, iproute2 (`ip`), and a `tun0` VPN interface — i.e. a stock Kali exam/lab box.
+
 ## Credits
 
 - **Salar** — original creation, April 2022
@@ -26,14 +28,6 @@ To uninstall (only removes the tlogger block from `.zshrc`, your other edits are
 
 ```bash
 ./setup_tloggerV2.sh uninstall
-```
-
-### macOS
-
-`ip`/`tun0` are Linux-only. If you're running this on macOS (e.g. practicing before the exam), also source `tlogger_patch.zsh` from your `.zshrc` — it swaps in `ifconfig`/`utun` detection, and skips the logging hooks entirely when running inside Claude Code's Bash tool so it doesn't interfere with the tool's stdout capture.
-
-```bash
-echo 'source /path/to/tlogger_patch.zsh' >> ~/.zshrc
 ```
 
 ## Commands

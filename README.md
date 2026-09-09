@@ -43,10 +43,25 @@ To uninstall (only removes the tlogger block from `.zshrc`, your other edits are
 
 Logs are written to `~/Desktop/logs/session_<UTC_TIMESTAMP>_UTC.log`. Each command entry also records its exit code (`[exit:N]`), and SSH sessions are captured in full — see below.
 
+## Recording more interactive tools
+
+Interactive programs are handled by two lists near the top of the `.zshrc` block the installer writes:
+
+```zsh
+TLOGGER_PTY_CMDS=(ssh)          # captured through a real pty, session goes into the log
+TLOGGER_INTERACTIVE_CMDS=(vim vi nvim nano ... )   # skipped, not recorded
+```
+
+To record something, move its name into `TLOGGER_PTY_CMDS` — one word, no other changes. It gets an alias that routes it through `script`, so it keeps a real terminal while the transcript is cleaned and appended to the log. Good candidates are shells and REPL-style tools whose scrollback is worth keeping: `msfconsole`, `mysql`, `psql`, `evil-winrm`, `nc`.
+
+Editors and pagers are deliberately left in the skip list: capturing `vim` mostly records screen redraws, not content.
+
+The wrapper stands down by itself when it would get in the way — when logging is off, when the command is in a pipeline or has its input/output redirected, or when `script` isn't installed — and falls through to running the command untouched.
+
 ## Design notes / known limitations
 
-- **SSH sessions are fully captured.** `ssh` is wrapped so it runs under `script`, which gives it a real pty — the remote session renders normally on your screen *and* the whole transcript (remote prompt, commands, output) lands in the log. Passwords typed at an `ssh` password prompt are not captured, because the terminal echo is off and only what's displayed gets recorded.
-- **Other interactive/TUI tools are not captured.** `vim`, `msfconsole`, `tmux`, `mysql`, etc. (see `TLOGGER_INTERACTIVE_CMDS`) bypass logging and run directly against the real terminal. The general logging mechanism uses `exec > >(tee ...)`, which does not allocate a pty, so curses/full-screen apps would render incorrectly or have their output buffered if captured that way. The header line (command + timestamp) and exit code are still logged; the session content is not. Take screenshots for those. The same `script`-wrapper trick used for `ssh` could be extended to any of them — see the `ssh()` function in the script — but for editors and pagers the captured output is mostly screen-redraw noise, which is why it's opt-in per command rather than applied to the whole whitelist.
+- **SSH sessions are fully captured.** `ssh` runs under `script`, which gives it a real pty — the remote session renders normally on your screen *and* the whole transcript (remote prompt, commands, output) lands in the log. Passwords typed at an `ssh` password prompt are not captured, because terminal echo is off and only what's displayed gets recorded.
+- **Other interactive/TUI tools are not captured.** `vim`, `msfconsole`, `tmux`, `mysql`, etc. (see `TLOGGER_INTERACTIVE_CMDS`) bypass logging and run directly against the real terminal. The general logging mechanism uses `exec > >(tee ...)`, which does not allocate a pty, so curses/full-screen apps would render incorrectly or have their output buffered if captured that way. The header line and exit code are still logged; the session content is not. See "Recording more interactive tools" above if you want any of them captured.
 - If the remote box you SSH into runs a heavily customized shell (autosuggestions, syntax highlighting, a multi-line prompt), its constant line redraws show up in the captured transcript as duplicated fragments. A plain `bash` prompt — which is what you usually land on after popping a shell — records cleanly.
 - The regex used to strip ANSI escape codes from captured output is reasonably thorough but not a full terminal-sequence parser; a small number of exotic escape sequences may leak through.
 - Log files contain everything you type and everything captured commands print, in cleartext — including credentials passed on the command line. Treat log files as sensitive.

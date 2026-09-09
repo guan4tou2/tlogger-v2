@@ -156,6 +156,14 @@ autoload -Uz add-zsh-hook
 add-zsh-hook precmd tlogger_capture_exit
 add-zsh-hook precmd configure_prompt
 
+# Captured through a real pty via script(1): the session renders normally
+# on screen AND the full transcript goes into the log.
+# Add any interactive command you want recorded, e.g. (ssh msfconsole mysql)
+TLOGGER_PTY_CMDS=(ssh)
+
+# Skipped entirely: these run straight against the terminal and are not
+# recorded, because piping them through tee breaks their rendering.
+# Move a command from here into TLOGGER_PTY_CMDS to record it instead.
 TLOGGER_INTERACTIVE_CMDS=(
   vim vi nvim nano emacs
   less more man
@@ -243,19 +251,34 @@ tlogger_grep() {
   grep -n --color=auto -H -- "\$@" "\$HOME"/Desktop/logs/session_*_UTC.log 2>/dev/null
 }
 
-ssh() {
-  if [[ -z "\$TLOGGER_ACTIVE" ]]; then
-    command ssh "\$@"
+_tlogger_pty_run() {
+  local _tlogger_cmd="\$1"
+  shift
+  if [[ -z "\$TLOGGER_ACTIVE" ]] || [[ ! -t 0 ]] || [[ ! -t 1 ]] \
+     || ! command -v script >/dev/null 2>&1; then
+    command "\$_tlogger_cmd" "\$@"
     return \$?
   fi
   local _tlogger_tmp
-  _tlogger_tmp="\$(mktemp -t tlogger_ssh.XXXXXX)"
-  script -qe -c "command ssh \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
-  local _tlogger_rc=\$?
-  [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
-  rm -f "\$_tlogger_tmp"
+  _tlogger_tmp="\$(mktemp -t tlogger_pty.XXXXXX)" || {
+    command "\$_tlogger_cmd" "\$@"
+    return \$?
+  }
+  local _tlogger_rc=0
+  {
+    script -qe -c "command \$_tlogger_cmd \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
+    _tlogger_rc=\$?
+    [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
+  } always {
+    rm -f "\$_tlogger_tmp"
+  }
   return \$_tlogger_rc
 }
+
+for _tlogger_pc in \$TLOGGER_PTY_CMDS; do
+  alias "\$_tlogger_pc"="_tlogger_pty_run \$_tlogger_pc"
+done
+unset _tlogger_pc
 
 tlogger_preexec() {
   [[ -n "\$TLOGGER_ACTIVE" ]] || return
@@ -270,10 +293,15 @@ tlogger_preexec() {
 
   TLOGGER_LAST_LOGGED=1
 
+  # Only a bare invocation is exempt from capture. In a pipeline or list the
+  # output belongs to the whole line, so it still goes through tee; the pty
+  # wrapper stands down on its own there because stdout is no longer a tty.
   local _tlogger_cmd="\${1%% *}"
-  for _tlogger_ic in \$TLOGGER_INTERACTIVE_CMDS; do
-    [[ "\$_tlogger_cmd" == "\$_tlogger_ic" ]] && return
-  done
+  if [[ "\$1" != *[\\|\\;\\&\\<\\>]* ]]; then
+    for _tlogger_ic in \$TLOGGER_INTERACTIVE_CMDS \$TLOGGER_PTY_CMDS; do
+      [[ "\$_tlogger_cmd" == "\$_tlogger_ic" ]] && return
+    done
+  fi
 
   TLOGGER_LAST_PIPED=1
   exec > >(

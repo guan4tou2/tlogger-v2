@@ -142,6 +142,16 @@ tlogger_capture_exit() {
   TLOGGER_LAST_EXIT=\$?
 }
 
+_tlogger_clean_ansi() {
+  LC_ALL=C sed -r \
+    -e 's/\\x1B\\][^\\a]*\\a//g' \
+    -e 's/\\x1B\\][^\\x1B]*\\x1B\\\\//g' \
+    -e 's/\\x1B\\[[0-9;:?]*[@-~]//g' \
+    -e 's/\\x1B[=>McD78EHZ]//g' \
+    -e 's/\\r\$//' \
+    -e '/^Script (started|done) on .*\\[.*\\]\$/d'
+}
+
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd tlogger_capture_exit
 add-zsh-hook precmd configure_prompt
@@ -233,6 +243,20 @@ tlogger_grep() {
   grep -n --color=auto -H -- "\$@" "\$HOME"/Desktop/logs/session_*_UTC.log 2>/dev/null
 }
 
+ssh() {
+  if [[ -z "\$TLOGGER_ACTIVE" ]]; then
+    command ssh "\$@"
+    return \$?
+  fi
+  local _tlogger_tmp
+  _tlogger_tmp="\$(mktemp -t tlogger_ssh.XXXXXX)"
+  script -qe -c "command ssh \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
+  local _tlogger_rc=\$?
+  [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
+  rm -f "\$_tlogger_tmp"
+  return \$_tlogger_rc
+}
+
 tlogger_preexec() {
   [[ -n "\$TLOGGER_ACTIVE" ]] || return
 
@@ -253,14 +277,7 @@ tlogger_preexec() {
 
   TLOGGER_LAST_PIPED=1
   exec > >(
-    tee >( \
-      LC_ALL=C sed -r \
-        -e 's/\\x1B\\][^\\a]*\\a//g' \
-        -e 's/\\x1B\\][^\\x1B]*\\x1B\\\\//g' \
-        -e 's/\\x1B\\[[0-9;:?]*[@-~]//g' \
-        -e 's/\\x1B[=>McD78EHZ]//g' \
-        >> "\$TLOGGER_LOG"
-    )
+    tee >( _tlogger_clean_ansi >> "\$TLOGGER_LOG" )
   ) 2>&1
   disown %+ 2>/dev/null
 }

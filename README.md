@@ -41,11 +41,13 @@ To uninstall (only removes the tlogger block from `.zshrc`, your other edits are
 | `tlogger_mode auto\|manual` | Switch mode at runtime, no reinstall needed |
 | `tlogger_grep <pattern>` | Search across all session logs at once |
 
-Logs are written to `~/Desktop/logs/session_<UTC_TIMESTAMP>_UTC.log`. Each command entry also records its exit code (`[exit:N]`).
+Logs are written to `~/Desktop/logs/session_<UTC_TIMESTAMP>_UTC.log`. Each command entry also records its exit code (`[exit:N]`), and SSH sessions are captured in full — see below.
 
 ## Design notes / known limitations
 
-- **Interactive/TUI tools are not captured.** Commands like `vim`, `ssh`, `msfconsole`, `tmux`, `mysql`, etc. (see `TLOGGER_INTERACTIVE_CMDS` in the script) bypass logging entirely and run directly against the real terminal. This is intentional: the logging mechanism uses `exec > >(tee ...)`, which doesn't allocate a real pty, so curses/full-screen apps would render incorrectly or have their output buffered/delayed if captured. The header line (command + timestamp) is still logged; the interactive session itself is not. Take screenshots for those.
+- **SSH sessions are fully captured.** `ssh` is wrapped so it runs under `script`, which gives it a real pty — the remote session renders normally on your screen *and* the whole transcript (remote prompt, commands, output) lands in the log. Passwords typed at an `ssh` password prompt are not captured, because the terminal echo is off and only what's displayed gets recorded.
+- **Other interactive/TUI tools are not captured.** `vim`, `msfconsole`, `tmux`, `mysql`, etc. (see `TLOGGER_INTERACTIVE_CMDS`) bypass logging and run directly against the real terminal. The general logging mechanism uses `exec > >(tee ...)`, which does not allocate a pty, so curses/full-screen apps would render incorrectly or have their output buffered if captured that way. The header line (command + timestamp) and exit code are still logged; the session content is not. Take screenshots for those. The same `script`-wrapper trick used for `ssh` could be extended to any of them — see the `ssh()` function in the script — but for editors and pagers the captured output is mostly screen-redraw noise, which is why it's opt-in per command rather than applied to the whole whitelist.
+- If the remote box you SSH into runs a heavily customized shell (autosuggestions, syntax highlighting, a multi-line prompt), its constant line redraws show up in the captured transcript as duplicated fragments. A plain `bash` prompt — which is what you usually land on after popping a shell — records cleanly.
 - The regex used to strip ANSI escape codes from captured output is reasonably thorough but not a full terminal-sequence parser; a small number of exotic escape sequences may leak through.
 - Log files contain everything you type and everything captured commands print, in cleartext — including credentials passed on the command line. Treat log files as sensitive.
 

@@ -89,10 +89,10 @@ cat <<'USAGE'
 TLOGGER – Terminal Session Logger
 
 Install:
-  ./setup_tlogger.sh install
+  ./setup_tloggerV2.sh install
 
 Uninstall:
-  ./setup_tlogger.sh uninstall
+  ./setup_tloggerV2.sh uninstall
 
 Manual mode:
   tlogger_start
@@ -101,10 +101,24 @@ Manual mode:
 Automatic mode:
   Logging starts automatically in every new terminal
 
+While logging:
+  tlogger_status              is it running, where, how big
+  tlogger_note "found creds"  drop a marker into the log
+  tlogger_grep <pattern>      search every session log
+  tlogger_mode auto|manual    switch mode without reinstalling
+  tlogger_pty add <cmd>       capture an interactive command through a pty
+
 Logs:
   ~/Desktop/logs/session_<UTC_TIMESTAMP>_UTC.log
 
 USAGE
+}
+
+print_reload_hint() {
+  echo -e "${YELLOW}[!] This shell was started before the install, so the tlogger${RESET}"
+  echo -e "${YELLOW}    commands are not defined in it yet. Start a new terminal, or:${RESET}"
+  echo -e "${GREEN}      exec zsh${RESET}"
+  echo
 }
 
 install() {
@@ -398,6 +412,7 @@ EOF
   fi
 
   print_usage
+  print_reload_hint
 }
 
 uninstall() {

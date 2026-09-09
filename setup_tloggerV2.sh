@@ -134,7 +134,12 @@ tun0_ip() {
   ip -4 addr show tun0 2>/dev/null | awk '/inet /{print \$2}' | cut -d/ -f1
 }
 
+# Remember whatever prompt was already configured, so a theme is not
+# clobbered while logging is off and can be handed back on stop.
+TLOGGER_ORIG_PROMPT="\$PROMPT"
+
 configure_prompt() {
+  [[ -n "\$TLOGGER_ACTIVE" ]] || return
   PROMPT=\$'%F{blue}┌──%f(%F{red}%n%f㉿%F{green}%m%f)-[%F{cyan}%~%f] [%F{yellow}\$(TZ=UTC date "+%Y-%m-%d %H:%M:%S UTC")%f] [%F{magenta}tun0:\$(tun0_ip)%f]\\n%F{blue}└─%f$ '
 }
 
@@ -154,7 +159,6 @@ _tlogger_clean_ansi() {
 
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd tlogger_capture_exit
-add-zsh-hook precmd configure_prompt
 
 # Captured through a real pty via script(1): the session renders normally
 # on screen AND the full transcript goes into the log.
@@ -194,6 +198,7 @@ tlogger_stop() {
   [[ -z "\$TLOGGER_ACTIVE" ]] && return
   unset TLOGGER_ACTIVE
   export TLOGGER_PAUSED=1
+  [[ -n "\$TLOGGER_ORIG_PROMPT" ]] && PROMPT="\$TLOGGER_ORIG_PROMPT"
   exec >/dev/tty 2>&1
   echo "[+] Logging stopped"
 }
@@ -328,6 +333,8 @@ tlogger_precmd() {
 
 add-zsh-hook preexec tlogger_preexec
 add-zsh-hook precmd tlogger_precmd
+# after tlogger_precmd, so the prompt reflects logging state set this cycle
+add-zsh-hook precmd configure_prompt
 
 ### TLOGGER FINAL CLEAN END ###
 

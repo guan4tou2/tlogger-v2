@@ -162,12 +162,15 @@ tlogger_capture_exit() {
 }
 
 _tlogger_clean_ansi() {
+  # "|" as the delimiter so the 0x20-0x2F intermediate range can contain "/"
+  # without an escape - inside a bracket expression a backslash is literal,
+  # and "[ -\/]" silently becomes the range 0x20-0x5C, which swallows text.
   LC_ALL=C sed -r \
-    -e 's/\\x1B\\][^\\a]*\\a//g' \
-    -e 's/\\x1B\\][^\\x1B]*\\x1B\\\\//g' \
-    -e 's/\\x1B\\[[0-9;:?]*[@-~]//g' \
-    -e 's/\\x1B[=>McD78EHZ]//g' \
-    -e 's/\\r\$//' \
+    -e 's|\\x1B\\][^\\a]*\\a||g' \
+    -e 's|\\x1B\\][^\\x1B]*\\x1B\\\\||g' \
+    -e 's|\\x1B\\[[0-9;:<=>?]*[ -/]*[@-~]||g' \
+    -e 's|\\x1B[=>McD78EHZ]||g' \
+    -e 's|\\r\$||' \
     -e '/^Script (started|done) on .*\\[.*\\]\$/d'
 }
 

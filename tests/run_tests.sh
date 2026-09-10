@@ -174,6 +174,102 @@ if [ -f "$WORK/shape_y/.zshrc" ]; then
 fi
 
 echo
+echo "manual mode"
+HOME_MAN="$WORK/manual"
+install_into "$HOME_MAN" 1 n
+drive "$HOME_MAN" "$WORK/manual.tty" \
+  "echo BEFORE_START" "tlogger_status" "tlogger_start" "echo WHILE_ON" \
+  "tlogger_stop" "echo AFTER_OFF"
+LOG_MAN="$(newest_log "$HOME_MAN")"
+if [ -s "$LOG_MAN" ]; then pass "manual start creates a log"; else fail "manual start creates a log"; fi
+check        "output while on is kept"        "WHILE_ON"      "$LOG_MAN"
+check_absent "nothing from before the start"  "BEFORE_START"  "$LOG_MAN"
+check_absent "nothing after the stop"         "AFTER_OFF"     "$LOG_MAN"
+check        "status reports the mode"        "mode: manual"  "$WORK/manual.tty"
+
+echo
+echo "installer edge cases"
+HOME_FRESH="$WORK/fresh"
+mkdir -p "$HOME_FRESH"          # deliberately no .zshrc at all
+printf '2\nn\n' | HOME="$HOME_FRESH" bash "$INSTALLER" install >/dev/null 2>&1
+check "installs onto an account with no .zshrc" "TLOGGER FINAL" "$HOME_FRESH/.zshrc"
+printf '2\nn\n' | HOME="$HOME_FRESH" bash "$INSTALLER" install > "$WORK/reinstall.out" 2>&1
+if [ "$(grep -ac 'TLOGGER FINAL CLEAN START' "$HOME_FRESH/.zshrc")" = 1 ]; then
+  pass "installing twice does not duplicate the block"
+else
+  fail "installing twice does not duplicate the block"
+fi
+check "installing twice says how to upgrade" "uninstall" "$WORK/reinstall.out"
+
+echo
+echo "logging that cannot start"
+HOME_BAD="$WORK/cannot_start"
+install_into "$HOME_BAD" 2 n
+mkdir -p "$HOME_BAD/Desktop"
+rm -rf "$HOME_BAD/Desktop/logs"
+: > "$HOME_BAD/Desktop/logs"     # a file where the directory should be
+drive "$HOME_BAD" "$WORK/bad.tty" "echo one" "echo two" "echo three"
+if [ "$(grep -ac 'cannot create' "$WORK/bad.tty")" = 1 ]; then
+  pass "the failure is reported once, not on every prompt"
+else
+  fail "the failure is reported once, not on every prompt"
+fi
+check "the shell stays usable" "three" "$WORK/bad.tty"
+
+echo
+echo "one log per terminal"
+HOME_MULTI="$WORK/multi"
+install_into "$HOME_MULTI" 2 n
+drive "$HOME_MULTI" "$WORK/m1.tty" "echo TERMINAL_ONE" &
+drive "$HOME_MULTI" "$WORK/m2.tty" "echo TERMINAL_TWO" &
+wait
+if [ "$(ls "$HOME_MULTI"/Desktop/logs/*.log 2>/dev/null | wc -l)" -ge 2 ]; then
+  pass "two terminals get two files"
+else
+  fail "two terminals get two files"
+fi
+if [ "$(grep -la 'TERMINAL_ONE' "$HOME_MULTI"/Desktop/logs/*.log 2>/dev/null | wc -l)" = 1 ]; then
+  pass "a command lands in exactly one of them"
+else
+  fail "a command lands in exactly one of them"
+fi
+
+if [ -f "$WORK/shape_y/.zshrc" ]; then
+  echo
+  echo "aliases and reloading"
+  HOME_AL="$WORK/alias"
+  install_into "$HOME_AL" 2 y
+  printf "alias ls='echo REAL_LS_RAN'\n%s" "$(cat "$HOME_AL/.zshrc")" > "$HOME_AL/.zshrc.new"
+  mv "$HOME_AL/.zshrc.new" "$HOME_AL/.zshrc"
+  drive "$HOME_AL" "$WORK/alias.tty" \
+    "tlogger_pty add ls" "ls" "tlogger_pty remove ls" "alias ls" \
+    "source ~/.zshrc" "ssh -V"
+  check "a captured command keeps the user's alias"  "REAL_LS_RAN"     "$WORK/alias.tty"
+  check "removing it hands the alias back"           "echo REAL_LS_RAN" "$WORK/alias.tty"
+  check "sourcing .zshrc again does not recurse"     "OpenSSH"          "$WORK/alias.tty"
+  check_absent "no runaway recursion"                "FUNCNEST"         "$WORK/alias.tty"
+
+  echo
+  echo "quoting"
+  HOME_Q="$WORK/quote"
+  install_into "$HOME_Q" 2 y
+  drive "$HOME_Q" "$WORK/quote.tty" \
+    "ssh -o BatchMode=yes -o ConnectTimeout=1 -p 9999 127.0.0.1 'echo a; echo b'"
+  LOG_Q="$(newest_log "$HOME_Q")"
+  check "an operator inside quotes is not a pipeline" "Connection refused" "$LOG_Q"
+fi
+
+echo
+echo "convenience commands refuse politely"
+HOME_C="$WORK/conv"
+install_into "$HOME_C" 1 n
+drive "$HOME_C" "$WORK/conv.tty" \
+  "tlogger_note nothing is running" "tlogger_grep anything" "tlogger_mode auto" "tlogger_mode"
+check "a note without logging says so"  "not active"      "$WORK/conv.tty"
+check "grep with no logs says so"       "no session logs" "$WORK/conv.tty"
+check "the mode can be switched"        "mode: automatic" "$WORK/conv.tty"
+
+echo
 echo "uninstall"
 HOME_UN="$WORK/uninstall"
 install_into "$HOME_UN" 2 y

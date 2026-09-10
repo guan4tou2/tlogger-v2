@@ -174,6 +174,42 @@ if [ -f "$WORK/shape_y/.zshrc" ]; then
 fi
 
 echo
+echo "large output"
+HOME_BIG="$WORK/big"
+install_into "$HOME_BIG" 2 n
+# seq, not a whitelisted command: something on TLOGGER_INTERACTIVE_CMDS is
+# skipped by design, and testing with one measures nothing.
+_old_settle="${TLOGGER_TEST_SETTLE:-2}"
+export TLOGGER_TEST_SETTLE=4
+drive "$HOME_BIG" "$WORK/big.tty" "seq 1 20000" "echo AFTER_BIG"
+export TLOGGER_TEST_SETTLE="$_old_settle"
+LOG_BIG="$(newest_log "$HOME_BIG")"
+if [ "$(grep -acE '^[0-9]+$' "$LOG_BIG" 2>/dev/null)" = 20000 ]; then
+  pass "20000 lines are all recorded"
+else
+  fail "20000 lines are all recorded ($(grep -acE '^[0-9]+$' "$LOG_BIG" 2>/dev/null) got through)"
+fi
+check "the next command is still recorded" "AFTER_BIG" "$LOG_BIG"
+
+echo
+echo "a log that cannot be written"
+HOME_FULL="$WORK/full"
+install_into "$HOME_FULL" 2 n
+drive "$HOME_FULL" "$WORK/full.tty" \
+  "TLOGGER_LOG=/dev/full" "echo ONE" "echo TWO" "echo THREE" "tlogger_status"
+if [ "$(grep -ac 'logging stopped' "$WORK/full.tty")" = 1 ]; then
+  pass "it gives up once instead of erroring on every prompt"
+else
+  fail "it gives up once instead of erroring on every prompt"
+fi
+check_absent "no internal errors reach the user" "tlogger_preexec:" "$WORK/full.tty"
+if [ "$(tr -d '\r' < "$WORK/full.tty" | grep -acE '^(ONE|TWO|THREE)$')" = 3 ]; then
+  pass "the commands themselves still run"
+else
+  fail "the commands themselves still run"
+fi
+
+echo
 echo "hostile output"
 HOME_W="$WORK/weird"
 install_into "$HOME_W" 2 n

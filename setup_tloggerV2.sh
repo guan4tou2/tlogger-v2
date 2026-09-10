@@ -595,13 +595,22 @@ tlogger_preexec() {
   # back under the ambient umask, usually world-readable.
   [[ -e "\$TLOGGER_LOG" ]] || ( umask 077; : >> "\$TLOGGER_LOG" ) 2>/dev/null
 
-  {
+  # A logger that cannot write should say so once and get out of the way. Left
+  # unguarded, a full disk makes zsh print four internal write errors before
+  # every prompt for the rest of the session.
+  if ! {
     printf "\\n┌──(%s㉿%s)-[%s] [%s] [tun0:%s]\\n" \
       "\$USER" "\$HOST" "\${PWD/#\$HOME/~}" \
       "\$(TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC')" \
       "\$(tun0_ip)"
     printf "└─$ %s\\n" "\$1"
-  } >> "\$TLOGGER_LOG"
+  } >> "\$TLOGGER_LOG" 2>/dev/null; then
+    unset TLOGGER_ACTIVE TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
+    export TLOGGER_PAUSED=1
+    echo "[tlogger] cannot write \${TLOGGER_LOG:-the log} - logging stopped." >&2
+    echo "[tlogger] free some space or fix the path, then run tlogger_start." >&2
+    return
+  fi
 
   TLOGGER_LAST_LOGGED=1
 

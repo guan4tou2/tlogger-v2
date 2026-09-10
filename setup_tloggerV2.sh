@@ -144,11 +144,20 @@ install() {
 
   mkdir -p "$LOGDIR"
 
+  # A fresh account may not have one yet; without this the backup below
+  # fails and set -e aborts the install.
+  [ -f "$ZSHRC" ] || touch "$ZSHRC"
+
   if [ ! -f "$BACKUP" ]; then
     cp "$ZSHRC" "$BACKUP"
   fi
 
   if grep -q "### TLOGGER FINAL CLEAN START ###" "$ZSHRC"; then
+    echo -e "${YELLOW}[i] TLOGGER is already installed in ${ZSHRC}.${RESET}"
+    echo -e "    Re-running install does not update the block or change the mode."
+    echo -e "    To upgrade or switch mode, remove it first:"
+    echo -e "${GREEN}      $0 uninstall && $0 install${RESET}"
+    echo
     print_usage
     exit 0
   fi
@@ -223,11 +232,21 @@ TLOGGER_INTERACTIVE_CMDS=(
 
 tlogger_start() {
   [[ -n "\$TLOGGER_ACTIVE" ]] && return
-  mkdir -p "\$HOME/Desktop/logs"
-  unset TLOGGER_PAUSED
+  local _dir="\$HOME/Desktop/logs"
+  if ! mkdir -p "\$_dir" 2>/dev/null || [[ ! -d "\$_dir" ]]; then
+    echo "[tlogger] cannot create \$_dir — logging NOT started" >&2
+    return 1
+  fi
   # The pid keeps two terminals opened in the same second apart; without it
   # they share a file and their commands interleave.
-  export TLOGGER_LOG="\$HOME/Desktop/logs/session_\$(date -u +%Y%m%d_%H%M%S)_\$\$_UTC.log"
+  local _log="\$_dir/session_\$(date -u +%Y%m%d_%H%M%S)_\$\$_UTC.log"
+  # 600: the log holds every command and its output, credentials included.
+  if ! ( umask 077; : >> "\$_log" ) 2>/dev/null || [[ ! -w "\$_log" ]]; then
+    echo "[tlogger] cannot write \$_log — logging NOT started" >&2
+    return 1
+  fi
+  unset TLOGGER_PAUSED
+  export TLOGGER_LOG="\$_log"
   export TLOGGER_ACTIVE=1
   echo "[+] Logging started"
   echo "[+] Log file: \$TLOGGER_LOG"
@@ -311,6 +330,12 @@ tlogger_pty() {
           echo "[tlogger] \$_c is a shell builtin and must run in this shell — not added"
           continue
         fi
+        # A function lives in this shell only; "command" inside the wrapper
+        # would look for an external program of that name and find nothing.
+        if (( \${+functions[\$_c]} )); then
+          echo "[tlogger] \$_c is a shell function and cannot be run through a pty — not added"
+          continue
+        fi
         if ! command -v "\$_c" >/dev/null 2>&1 && [[ -z "\${aliases[\$_c]}" ]]; then
           echo "[tlogger] warning: \$_c was not found in PATH — adding anyway"
         fi
@@ -355,7 +380,14 @@ tlogger_grep() {
     echo "usage: tlogger_grep <pattern>"
     return 1
   fi
-  grep -an --color=auto -H -- "\$@" "\$HOME"/Desktop/logs/session_*_UTC.log 2>/dev/null
+  setopt local_options null_glob
+  local -a _logs
+  _logs=("\$HOME"/Desktop/logs/session_*_UTC.log)
+  if (( \${#_logs} == 0 )); then
+    echo "[tlogger] no session logs yet"
+    return 1
+  fi
+  grep -an --color=auto -H -- "\$@" "\${_logs[@]}" 2>/dev/null
 }
 
 # Taking over a command name would silently drop an alias the user already
@@ -364,8 +396,12 @@ typeset -gA TLOGGER_PTY_ORIG
 
 _tlogger_pty_alias() {
   local _c="\$1"
-  [[ -n "\${aliases[\$_c]}" && -z "\${TLOGGER_PTY_ORIG[\$_c]}" ]] \
-    && TLOGGER_PTY_ORIG[\$_c]="\${aliases[\$_c]}"
+  local _existing="\${aliases[\$_c]}"
+  # Sourcing .zshrc again would otherwise store our own wrapper as the
+  # "original" and the command would call itself until FUNCNEST is hit.
+  [[ "\$_existing" == "_tlogger_pty_run "* ]] && _existing=""
+  [[ -n "\$_existing" && -z "\${TLOGGER_PTY_ORIG[\$_c]}" ]] \
+    && TLOGGER_PTY_ORIG[\$_c]="\$_existing"
   alias "\$_c"="_tlogger_pty_run \$_c"
 }
 
@@ -373,8 +409,11 @@ _tlogger_pty_run() {
   local _tlogger_cmd="\$1"
   shift
   local _tlogger_real="\${TLOGGER_PTY_ORIG[\$_tlogger_cmd]:-command \$_tlogger_cmd}"
+  # (z) splits the alias like the shell would, (Q) then removes one level of
+  # quoting so an alias body such as: foo "two words" keeps its argument
+  # intact instead of passing the quote characters through literally.
   local -a _tlogger_argv
-  _tlogger_argv=(\${(z)_tlogger_real})
+  _tlogger_argv=(\${(Q)\${(z)_tlogger_real}})
   if [[ -z "\$TLOGGER_ACTIVE" ]] || [[ ! -t 0 ]] || [[ ! -t 1 ]] \
      || ! command -v script >/dev/null 2>&1; then
     "\${_tlogger_argv[@]}" "\$@"
@@ -417,8 +456,34 @@ tlogger_preexec() {
   # Only a bare invocation is exempt from capture. In a pipeline or list the
   # output belongs to the whole line, so it still goes through tee; the pty
   # wrapper stands down on its own there because stdout is no longer a tty.
-  local _tlogger_cmd="\${1%% *}"
-  if [[ "\$1" != *[\\|\\;\\&\\<\\>]* ]]; then
+  # (z) splits the way the shell does, so an operator inside quotes stays
+  # part of its word: ssh host "a; b" is still a bare ssh invocation.
+  local -a _tlogger_words
+  _tlogger_words=(\${(z)1})
+
+  local _tlogger_bare=1 _tlogger_w
+  for _tlogger_w in "\$_tlogger_words[@]"; do
+    case "\$_tlogger_w" in
+      '|'|'||'|'&'|'&&'|';'|'<'|'>'|'>>'|'<<'|'|&'|'&>'|[0-9]'>'|[0-9]'>>')
+        _tlogger_bare=0
+        break
+        ;;
+    esac
+  done
+
+  # Look past wrappers and assignments - "sudo vim", "env X=1 vim" - and
+  # compare the basename, so /usr/bin/vim is recognised as vim.
+  local _tlogger_cmd="\${_tlogger_words[1]}"
+  while [[ -n "\$_tlogger_cmd" ]] && \
+        { [[ "\$_tlogger_cmd" == (sudo|doas|env|command|nohup|stdbuf|time|nice) ]] \
+          || [[ "\$_tlogger_cmd" == *=* ]]; }; do
+    shift _tlogger_words 2>/dev/null || break
+    (( \${#_tlogger_words} )) || break
+    _tlogger_cmd="\${_tlogger_words[1]}"
+  done
+  _tlogger_cmd="\${_tlogger_cmd:t}"
+
+  if (( _tlogger_bare )); then
     for _tlogger_ic in \$TLOGGER_INTERACTIVE_CMDS \$TLOGGER_PTY_CMDS; do
       [[ "\$_tlogger_cmd" == "\$_tlogger_ic" ]] && return
     done

@@ -71,6 +71,15 @@ $ tlogger_pty add msfconsole mysql
 $ tlogger_pty remove mysql
 ```
 
+### Reverse shells and the exam
+
+For OSCP the reverse-shell session is where the flags are, so whether it lands in the log matters. The defaults reflect one specific tradeoff that `script` cannot avoid:
+
+- **`socat` and `pwncat-cs` are captured by default.** They set up their own TTY, so capturing them through `script` is lossless — the remote prompt, `id`, and `cat proof.txt` all reach the log. `socat` records cleanly; `pwncat-cs` works too, but its status bar redraws leave repeated `bound to ...` fragments in the log around the actual output (the same redraw noise a fancy remote prompt produces).
+- **`nc`/`ncat`/`pwncat` stay native and are *not* logged.** A captured command cannot be suspended (see below), and the `nc` shell upgrade — `Ctrl-Z`, then `stty raw -echo; fg` — needs exactly that. Keeping `nc` native preserves the upgrade; the cost is that an `nc` reverse shell is not in the log, so screenshot those flags (OSCP wants the screenshot anyway).
+
+If you catch shells with `nc` and still want them logged, `tlogger_pty add nc` — but then the `Ctrl-Z` upgrade will not work in that session. Prefer `socat`/`pwncat-cs` if you want both.
+
 Anything on that list gets an alias routing it through `script`, so it keeps a real terminal while its transcript is cleaned and appended to the log. Good candidates are shells and REPL-style tools whose scrollback is worth keeping: `msfconsole`, `ligolo-proxy`, `mysql`, `psql`, `evil-winrm`, `nc`. The pivoting and impacket consoles are on the skip list by default, so they work but are not recorded; move the ones whose transcript you want into `TLOGGER_PTY_CMDS`.
 
 Editors and pagers are deliberately left in the skip list: capturing `vim` mostly records screen redraws, not content.
@@ -106,7 +115,7 @@ $ tlogger_pty add ls
 ./tests/run_tests.sh
 ```
 
-65 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
+67 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
 
 They cover both install shapes, both modes, exit codes, UTF-8, notes, log permissions, stop, prompt-plugin isolation, wrapper prefixes and quoting, job control, binary output, one-log-per-terminal, an unwritable log directory, alias preservation and reloading, pty capture, interrupted-capture recovery, the installer's edge cases and uninstall. Set `TLOGGER_TEST_SETTLE` to give each command longer on a slow machine.
 

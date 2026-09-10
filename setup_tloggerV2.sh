@@ -151,7 +151,7 @@ write_pty_block() {
 # Captured through a real pty via script(1): the session renders normally
 # on screen AND the full transcript goes into the log.
 # Add any interactive command you want recorded, e.g. (ssh msfconsole mysql)
-TLOGGER_PTY_CMDS=(ssh)
+TLOGGER_PTY_CMDS=(ssh socat pwncat-cs)
 
 # Taking over a command name would silently drop an alias the user already
 # had - Kali ships "ls --color=auto" - so remember it and keep using it.
@@ -415,6 +415,7 @@ tun0_ip() {
 
 tlogger_capture_exit() {
   TLOGGER_LAST_EXIT=\$?
+  setopt local_options no_err_exit unset
   # Everything a command produced must be closed out, and stdout handed
   # back, before any other precmd hook runs - otherwise a prompt plugin
   # that prints gets recorded as if the command had produced it.
@@ -476,7 +477,7 @@ TLOGGER_INTERACTIVE_CMDS=(
   python3 python python2 ipython
   irb pry
   sqlmap
-  nc ncat netcat
+  nc ncat netcat pwncat
 )
 
 
@@ -598,14 +599,33 @@ tlogger_grep() {
 
 tlogger_preexec() {
   [[ -n "\${TLOGGER_ACTIVE:-}" ]] || return
+  # Isolate from the user's shell options: under errexit a non-zero test in
+  # here would exit the whole shell, and nounset would abort on an unset var.
+  setopt local_options no_err_exit unset
 
   # Recreate the log at 600 if it went away: a plain append would bring it
   # back under the ambient umask, usually world-readable.
   [[ -e "\$TLOGGER_LOG" ]] || ( umask 077; : >> "\$TLOGGER_LOG" ) 2>/dev/null
 
-  # A logger that cannot write should say so once and get out of the way. Left
-  # unguarded, a full disk makes zsh print four internal write errors before
-  # every prompt for the rest of the session.
+  # Two different failures, both of which must stop logging with one message
+  # and no leaked error:
+  #  - the path is not writable (deleted log directory, bad path). Test for it
+  #    first, because a failed ">>" prints its open error before 2>/dev/null
+  #    can apply and one line would reach the terminal.
+  #  - the path is writable but the write itself fails (a full disk: /dev/full
+  #    opens fine, ENOSPC only on write). Detect that from the write's status.
+  _tlogger_stopped() {
+    unset TLOGGER_ACTIVE TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
+    export TLOGGER_PAUSED=1
+    echo "[tlogger] cannot write \${TLOGGER_LOG:-the log} - logging stopped." >&2
+    echo "[tlogger] free some space or fix the path, then run tlogger_start." >&2
+  }
+
+  if [[ ! -w "\$TLOGGER_LOG" ]]; then
+    _tlogger_stopped
+    return
+  fi
+
   if ! {
     printf "\\n┌──(%s㉿%s)-[%s] [%s] [tun0:%s]\\n" \
       "\$USER" "\$HOST" "\${PWD/#\$HOME/~}" \
@@ -613,10 +633,7 @@ tlogger_preexec() {
       "\$(tun0_ip)"
     printf "└─$ %s\\n" "\$1"
   } >> "\$TLOGGER_LOG" 2>/dev/null; then
-    unset TLOGGER_ACTIVE TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
-    export TLOGGER_PAUSED=1
-    echo "[tlogger] cannot write \${TLOGGER_LOG:-the log} - logging stopped." >&2
-    echo "[tlogger] free some space or fix the path, then run tlogger_start." >&2
+    _tlogger_stopped
     return
   fi
 
@@ -701,6 +718,7 @@ tlogger_preexec() {
 }
 
 tlogger_precmd() {
+  setopt local_options no_err_exit unset
   if [[ "\${TLOGGER_AUTOSTART:-0}" -eq 1 && -z "\${TLOGGER_ACTIVE:-}" && -z "\${TLOGGER_PAUSED:-}" ]]; then
     # A failure here would otherwise be retried, and reported, before every
     # single prompt for the rest of the session.

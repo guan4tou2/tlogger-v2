@@ -199,20 +199,38 @@ done
 
 echo
 echo "shell options and foreign hooks"
-HOME_OPT="$WORK/opts"
-install_into "$HOME_OPT" 2 n
+# One shell per concern: chaining these into a single session couples their
+# timing and makes the run flaky, even though each is fine on its own.
+
+HOME_FH="$WORK/foreign_hook"
+install_into "$HOME_FH" 2 n
 # an old-style preexec function, which zsh calls alongside the hook array
-printf 'preexec() { : }\n%s' "$(cat "$HOME_OPT/.zshrc")" > "$HOME_OPT/.zshrc.new"
-mv "$HOME_OPT/.zshrc.new" "$HOME_OPT/.zshrc"
-drive "$HOME_OPT" "$WORK/opts.tty" \
-  "setopt noclobber" "echo NOCLOBBER_FINE" \
-  "setopt errexit" "false" "echo SURVIVED_ERREXIT" "unsetopt errexit" \
-  "rm -rf \$HOME/Desktop/logs" "echo LOGDIR_GONE" "echo AND_AGAIN" \
-  "tlogger_grep '['"
-check "noclobber does not break logging"   "NOCLOBBER_FINE"  "$WORK/opts.tty"
-check "errexit does not kill the shell"    "SURVIVED_ERREXIT" "$WORK/opts.tty"
-check "losing the log directory is survivable" "AND_AGAIN"    "$WORK/opts.tty"
-check_absent "no internal errors reach the user" "tlogger_preexec:" "$WORK/opts.tty"
+printf 'preexec() { : }\n%s' "$(cat "$HOME_FH/.zshrc")" > "$HOME_FH/.zshrc.new"
+mv "$HOME_FH/.zshrc.new" "$HOME_FH/.zshrc"
+drive "$HOME_FH" "$WORK/fh.tty" "echo WITH_FOREIGN_PREEXEC"
+check "a foreign preexec function coexists" "WITH_FOREIGN_PREEXEC" "$WORK/fh.tty"
+
+HOME_NC="$WORK/noclobber"
+install_into "$HOME_NC" 2 n
+drive "$HOME_NC" "$WORK/nc.tty" "setopt noclobber" "echo NOCLOBBER_FINE"
+check "noclobber does not break logging" "NOCLOBBER_FINE" "$WORK/nc.tty"
+
+# errexit is deliberately not tested: zsh honours it interactively, so
+# `false` exits even a bare shell with no hooks - tlogger neither causes nor
+# prevents that. A test asserting the shell survives would be wrong about
+# zsh, not about tlogger.
+
+HOME_NU="$WORK/nounset"
+install_into "$HOME_NU" 2 n
+drive "$HOME_NU" "$WORK/nu.tty" "setopt nounset" "echo NOUNSET_FINE"
+check        "nounset does not break the hooks" "NOUNSET_FINE"      "$WORK/nu.tty"
+check_absent "nounset raises no internal error" "parameter not set" "$WORK/nu.tty"
+
+HOME_LD="$WORK/logdir"
+install_into "$HOME_LD" 2 n
+drive "$HOME_LD" "$WORK/ld.tty" "rm -rf \$HOME/Desktop/logs" "echo AND_AGAIN"
+check        "losing the log directory is survivable" "AND_AGAIN"        "$WORK/ld.tty"
+check_absent "no internal errors reach the user"      "tlogger_preexec:" "$WORK/ld.tty"
 
 echo
 echo "large output"
@@ -220,10 +238,7 @@ HOME_BIG="$WORK/big"
 install_into "$HOME_BIG" 2 n
 # seq, not a whitelisted command: something on TLOGGER_INTERACTIVE_CMDS is
 # skipped by design, and testing with one measures nothing.
-_old_settle="${TLOGGER_TEST_SETTLE:-2}"
-export TLOGGER_TEST_SETTLE=4
 drive "$HOME_BIG" "$WORK/big.tty" "seq 1 20000" "echo AFTER_BIG"
-export TLOGGER_TEST_SETTLE="$_old_settle"
 LOG_BIG="$(newest_log "$HOME_BIG")"
 if [ "$(grep -acE '^[0-9]+$' "$LOG_BIG" 2>/dev/null)" = 20000 ]; then
   pass "20000 lines are all recorded"

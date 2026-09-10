@@ -501,6 +501,10 @@ tlogger_start() {
   echo "[+] Logging started"
   echo "[+] Log file: \$TLOGGER_LOG"
   (( \${+functions[_tlogger_recover_orphans]} )) && _tlogger_recover_orphans
+  # Explicit: the line above is false in a build without pty capture, and
+  # its status would otherwise become the function's, so a successful start
+  # would look like a failure to the caller.
+  return 0
 }
 
 tlogger_stop() {

@@ -174,6 +174,34 @@ if [ -f "$WORK/shape_y/.zshrc" ]; then
 fi
 
 echo
+echo "a clean start says nothing alarming"
+for shape in n y; do
+  home="$WORK/quiet_$shape"
+  install_into "$home" 2 "$shape"
+  drive "$home" "$WORK/quiet_$shape.tty" "echo QUIET"
+  check "pty=$shape: logging starts" "Logging started" "$WORK/quiet_$shape.tty"
+  # a start that worked must not also report that it failed
+  check_absent "pty=$shape: no false failure" "autostart disabled" "$WORK/quiet_$shape.tty"
+done
+
+echo
+echo "shell options and foreign hooks"
+HOME_OPT="$WORK/opts"
+install_into "$HOME_OPT" 2 n
+# an old-style preexec function, which zsh calls alongside the hook array
+printf 'preexec() { : }\n%s' "$(cat "$HOME_OPT/.zshrc")" > "$HOME_OPT/.zshrc.new"
+mv "$HOME_OPT/.zshrc.new" "$HOME_OPT/.zshrc"
+drive "$HOME_OPT" "$WORK/opts.tty" \
+  "setopt noclobber" "echo NOCLOBBER_FINE" \
+  "setopt errexit" "false" "echo SURVIVED_ERREXIT" "unsetopt errexit" \
+  "rm -rf \$HOME/Desktop/logs" "echo LOGDIR_GONE" "echo AND_AGAIN" \
+  "tlogger_grep '['"
+check "noclobber does not break logging"   "NOCLOBBER_FINE"  "$WORK/opts.tty"
+check "errexit does not kill the shell"    "SURVIVED_ERREXIT" "$WORK/opts.tty"
+check "losing the log directory is survivable" "AND_AGAIN"    "$WORK/opts.tty"
+check_absent "no internal errors reach the user" "tlogger_preexec:" "$WORK/opts.tty"
+
+echo
 echo "large output"
 HOME_BIG="$WORK/big"
 install_into "$HOME_BIG" 2 n

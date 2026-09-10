@@ -186,6 +186,19 @@ tun0_ip() {
 
 tlogger_capture_exit() {
   TLOGGER_LAST_EXIT=\$?
+  # Everything a command produced must be closed out, and stdout handed
+  # back, before any other precmd hook runs - otherwise a prompt plugin
+  # that prints gets recorded as if the command had produced it.
+  if [[ -n "\${TLOGGER_LAST_LOGGED:-}" && -n "\${TLOGGER_LOG:-}" ]]; then
+    if [[ -n "\${TLOGGER_LAST_PIPED:-}" ]]; then
+      printf "[exit:%d]\\n" "\$TLOGGER_LAST_EXIT"
+    else
+      printf "[exit:%d]\\n" "\$TLOGGER_LAST_EXIT" >> "\$TLOGGER_LOG"
+    fi
+    unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
+  fi
+  [[ -n "\${TLOGGER_ACTIVE:-}" ]] && exec >/dev/tty 2>&1
+  return 0
 }
 
 _tlogger_clean_ansi() {
@@ -204,7 +217,10 @@ _tlogger_clean_ansi() {
 }
 
 autoload -Uz add-zsh-hook
-add-zsh-hook precmd tlogger_capture_exit
+# Put it at the front rather than appending: a prompt plugin loaded earlier
+# would otherwise run while the previous command's capture is still open.
+# Assigning the array also makes a second source of this file idempotent.
+precmd_functions=(tlogger_capture_exit \${precmd_functions:#tlogger_capture_exit})
 
 # Captured through a real pty via script(1): the session renders normally
 # on screen AND the full transcript goes into the log.
@@ -235,19 +251,36 @@ TLOGGER_INTERACTIVE_CMDS=(
 # file. Pick up anything left behind by a shell that is no longer running.
 _tlogger_recover_orphans() {
   setopt local_options null_glob
-  local _f _pid
-  for _f in "\${TMPDIR:-/tmp}"/tlogger_pty.*; do
+  local _f _pid _claim
+  for _f in "\${TMPDIR:-/tmp}"/tlogger_pty.*(.N); do
+    [[ "\$_f" == *.claimed.* ]] && continue
     _pid="\${\${_f:t}#tlogger_pty.}"
     _pid="\${_pid%%.*}"
     [[ "\$_pid" == <-> ]] || continue
     kill -0 "\$_pid" 2>/dev/null && continue
-    if [[ -s "\$_f" ]]; then
-      printf "\\n### RECOVERED from an interrupted capture (pid %s) ###\\n" "\$_pid" \
-        >> "\$TLOGGER_LOG"
-      _tlogger_clean_ansi < "\$_f" >> "\$TLOGGER_LOG"
+
+    # Claim by rename: whoever wins the rename owns the file, so two
+    # terminals starting at once cannot both import the same transcript.
+    _claim="\${_f}.claimed.\$\$"
+    mv -- "\$_f" "\$_claim" 2>/dev/null || continue
+
+    if [[ -s "\$_claim" ]]; then
+      # Only drop the source once it is safely in the log: on a full disk
+      # this is the sole copy of that session.
+      if printf "\\n### RECOVERED from an interrupted capture (pid %s) ###\\n" "\$_pid" \
+           >> "\$TLOGGER_LOG" 2>/dev/null \
+         && _tlogger_clean_ansi < "\$_claim" >> "\$TLOGGER_LOG" 2>/dev/null; then
+        rm -f -- "\$_claim"
+      else
+        echo "[tlogger] could not write recovered transcript; kept at \$_claim" >&2
+        mv -- "\$_claim" "\$_f" 2>/dev/null
+        return 1
+      fi
+    else
+      rm -f -- "\$_claim"
     fi
-    rm -f "\$_f"
   done
+  return 0
 }
 
 tlogger_start() {
@@ -307,6 +340,14 @@ tlogger_note() {
     echo "[tlogger] not active — note not saved (run tlogger_start first)"
     return 1
   fi
+  # While a command is being captured, stdout is that capture. Writing the
+  # marker there keeps it in step with output produced earlier on the same
+  # line; writing to the file directly would overtake the buffered stream.
+  if [[ -n "\${TLOGGER_LAST_PIPED:-}" ]]; then
+    printf "\\n### NOTE [%s] %s ###\\n" \
+      "\$(TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC')" "\$*"
+    return 0
+  fi
   if ! printf "\\n### NOTE [%s] %s ###\\n" \
        "\$(TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC')" "\$*" >> "\$TLOGGER_LOG" 2>/dev/null; then
     echo "[tlogger] could not write to \$TLOGGER_LOG — note NOT saved" >&2
@@ -333,21 +374,78 @@ tlogger_mode() {
   esac
 }
 
+# Apply this shell's additions and removals to whatever is on disk now,
+# under a lock, so two terminals editing the list do not overwrite each
+# other with their own stale copy.
 _tlogger_persist_pty_cmds() {
+  local -a _added=("\${(@P)1}") _removed=("\${(@P)2}")
+  # :A resolves symlinks - editing the link itself would replace it with a
+  # regular file and orphan the dotfile it points at.
   local _zshrc="\$HOME/.zshrc"
-  [[ -f "\$_zshrc" ]] || return
-  grep -q '^TLOGGER_PTY_CMDS=(' "\$_zshrc" || return
-  sed -i "s|^TLOGGER_PTY_CMDS=(.*)\$|TLOGGER_PTY_CMDS=(\$TLOGGER_PTY_CMDS)|" "\$_zshrc" \
-    && echo "[tlogger] saved — other open terminals pick this up on restart"
+  _zshrc="\${_zshrc:A}"
+  [[ -f "\$_zshrc" ]] || return 1
+  grep -q '^TLOGGER_PTY_CMDS=(' "\$_zshrc" || return 1
+
+  local _lock="\${_zshrc}.tlogger.lock" _tries=0 _owner
+  while ! mkdir "\$_lock" 2>/dev/null; do
+    # A shell killed while holding the lock would otherwise block every
+    # later save for good, so take it over once its owner is gone.
+    _owner=\$(cat "\$_lock/pid" 2>/dev/null)
+    if [[ -z "\$_owner" ]] || ! kill -0 "\$_owner" 2>/dev/null; then
+      rm -rf "\$_lock" 2>/dev/null
+      continue
+    fi
+    (( ++_tries > 30 )) && { echo "[tlogger] config is locked by pid \$_owner; not saved" >&2; return 1; }
+    sleep 0.1
+  done
+  echo \$\$ > "\$_lock/pid" 2>/dev/null
+
+  {
+    local _line _disk
+    _line=\$(grep -m1 '^TLOGGER_PTY_CMDS=(' "\$_zshrc")
+    # The parentheses have to be escaped: unquoted they are read as glob
+    # grouping and zsh rejects the pattern outright.
+    _disk="\${_line#*\\(}"
+    _disk="\${_disk%\\)*}"
+    local -a _list=(\${=_disk}) _c
+    for _c in "\$_added[@]"; do
+      (( \${_list[(I)\$_c]} )) || _list+=("\$_c")
+    done
+    for _c in "\$_removed[@]"; do
+      _list=("\${(@)_list:#\$_c}")
+    done
+
+    local _tmp="\${_zshrc}.tlogger.new"
+    if sed "s|^TLOGGER_PTY_CMDS=(.*)\$|TLOGGER_PTY_CMDS=(\${_list})|" "\$_zshrc" > "\$_tmp" \
+       && zsh -n "\$_tmp" 2>/dev/null; then
+      cat "\$_tmp" > "\$_zshrc" && echo "[tlogger] saved — other terminals pick this up on restart"
+      rm -f "\$_tmp"
+    else
+      rm -f "\$_tmp"
+      echo "[tlogger] refusing to write an unparsable .zshrc; nothing saved" >&2
+      return 1
+    fi
+  } always {
+    rm -rf "\$_lock" 2>/dev/null
+  }
 }
 
 tlogger_pty() {
   local _c
+  local -a _tlogger_added _tlogger_removed
   case "\$1" in
     add)
       shift
       [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty add <cmd>..."; return 1; }
       for _c in "\$@"; do
+        # The name is written into .zshrc, so anything outside a plain
+        # command name could break the file on the next shell start.
+        # Strip every allowed character; anything left over is not a name we
+        # can safely write into .zshrc. Avoids depending on extended_glob.
+        if [[ -z "\$_c" || -n "\${_c//[A-Za-z0-9_.+-]/}" ]]; then
+          echo "[tlogger] \$_c is not a plain command name — not added"
+          continue
+        fi
         if (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
           echo "[tlogger] \$_c is already captured"
           continue
@@ -368,6 +466,7 @@ tlogger_pty() {
           echo "[tlogger] warning: \$_c was not found in PATH — adding anyway"
         fi
         TLOGGER_PTY_CMDS+=("\$_c")
+        _tlogger_added+=("\$_c")
         _tlogger_pty_alias "\$_c"
         echo "[tlogger] \$_c is now captured through a pty"
         # script(1) owns the pty, so Ctrl-Z stops inside it instead of
@@ -375,7 +474,7 @@ tlogger_pty() {
         # Ctrl-Z then "stty raw -echo; fg" is the usual upgrade.
         echo "           note: Ctrl-Z will not suspend \$_c while it is captured"
       done
-      _tlogger_persist_pty_cmds
+      (( \${#_tlogger_added} )) && _tlogger_persist_pty_cmds _tlogger_added _tlogger_removed
       ;;
     remove|rm)
       shift
@@ -386,7 +485,8 @@ tlogger_pty() {
           continue
         fi
         TLOGGER_PTY_CMDS=("\${(@)TLOGGER_PTY_CMDS:#\$_c}")
-        if [[ -n "\${TLOGGER_PTY_ORIG[\$_c]}" ]]; then
+        _tlogger_removed+=("\$_c")
+        if [[ -n "\${TLOGGER_PTY_ORIG[\$_c]:-}" ]]; then
           alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
           unset "TLOGGER_PTY_ORIG[\$_c]"
         else
@@ -394,7 +494,7 @@ tlogger_pty() {
         fi
         echo "[tlogger] \$_c is no longer captured"
       done
-      _tlogger_persist_pty_cmds
+      (( \${#_tlogger_removed} )) && _tlogger_persist_pty_cmds _tlogger_added _tlogger_removed
       ;;
     ''|list)
       echo "[tlogger] captured through a pty: \$TLOGGER_PTY_CMDS"
@@ -428,13 +528,32 @@ typeset -gA TLOGGER_PTY_ORIG
 
 _tlogger_pty_alias() {
   local _c="\$1"
-  local _existing="\${aliases[\$_c]}"
+  local _existing="\${aliases[\$_c]:-}"
   # Sourcing .zshrc again would otherwise store our own wrapper as the
   # "original" and the command would call itself until FUNCNEST is hit.
-  [[ "\$_existing" == "_tlogger_pty_run "* ]] && _existing=""
-  [[ -n "\$_existing" && -z "\${TLOGGER_PTY_ORIG[\$_c]}" ]] \
-    && TLOGGER_PTY_ORIG[\$_c]="\$_existing"
+  if [[ "\$_existing" == "_tlogger_pty_run "* ]]; then
+    :
+  elif [[ -n "\$_existing" ]]; then
+    # Take the current definition every time, so editing the alias and
+    # sourcing again is picked up instead of keeping the stale one.
+    TLOGGER_PTY_ORIG[\$_c]="\$_existing"
+  fi
   alias "\$_c"="_tlogger_pty_run \$_c"
+}
+
+# On a reload, hand back any command that has since been taken off the list.
+_tlogger_pty_sync() {
+  local _c
+  for _c in "\${(@k)TLOGGER_PTY_ORIG}"; do
+    (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )) && continue
+    [[ "\${aliases[\$_c]:-}" == "_tlogger_pty_run "* ]] && alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
+    unset "TLOGGER_PTY_ORIG[\$_c]"
+  done
+  for _c in "\${(@k)aliases}"; do
+    [[ "\${aliases[\$_c]}" == "_tlogger_pty_run "* ]] || continue
+    (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )) && continue
+    unalias "\$_c" 2>/dev/null
+  done
 }
 
 _tlogger_pty_run() {
@@ -458,7 +577,10 @@ _tlogger_pty_run() {
   }
   local _tlogger_rc=0
   {
-    script -qe -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
+    # -f flushes after every write: without it the transcript can still be
+    # sitting in a buffer when the terminal is killed, leaving nothing to
+    # recover even though the screen showed the output.
+    script -qef -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
     _tlogger_rc=\$?
     [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
   } always {
@@ -471,9 +593,14 @@ for _tlogger_pc in \$TLOGGER_PTY_CMDS; do
   _tlogger_pty_alias "\$_tlogger_pc"
 done
 unset _tlogger_pc
+_tlogger_pty_sync
 
 tlogger_preexec() {
-  [[ -n "\$TLOGGER_ACTIVE" ]] || return
+  [[ -n "\${TLOGGER_ACTIVE:-}" ]] || return
+
+  # Recreate the log at 600 if it went away: a plain append would bring it
+  # back under the ambient umask, usually world-readable.
+  [[ -e "\$TLOGGER_LOG" ]] || ( umask 077; : >> "\$TLOGGER_LOG" ) 2>/dev/null
 
   {
     printf "\\n┌──(%s㉿%s)-[%s] [%s] [tun0:%s]\\n" \
@@ -558,20 +685,7 @@ tlogger_preexec() {
 }
 
 tlogger_precmd() {
-  if [[ -n "\$TLOGGER_LAST_LOGGED" && -n "\$TLOGGER_LOG" ]]; then
-    if [[ -n "\$TLOGGER_LAST_PIPED" ]]; then
-      printf "[exit:%d]\\n" "\$TLOGGER_LAST_EXIT"
-    else
-      printf "[exit:%d]\\n" "\$TLOGGER_LAST_EXIT" >> "\$TLOGGER_LOG"
-    fi
-    unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
-  fi
-
-  # Hand stdout back before anything else, so whatever runs below prints to
-  # the terminal rather than into the previous command's capture.
-  [[ -n "\$TLOGGER_ACTIVE" ]] && exec >/dev/tty 2>&1
-
-  if [[ "\$TLOGGER_AUTOSTART" -eq 1 && -z "\$TLOGGER_ACTIVE" && -z "\$TLOGGER_PAUSED" ]]; then
+  if [[ "\${TLOGGER_AUTOSTART:-0}" -eq 1 && -z "\${TLOGGER_ACTIVE:-}" && -z "\${TLOGGER_PAUSED:-}" ]]; then
     # A failure here would otherwise be retried, and reported, before every
     # single prompt for the rest of the session.
     tlogger_start || {

@@ -24,6 +24,12 @@ check() { # name, expected-substring, file
   if grep -qa -- "$2" "$3" 2>/dev/null; then pass "$1"; else fail "$1"; fi
 }
 
+check_line() { # name, exact-substring (fixed), file
+  # grep -F so "[exit:42]" is a literal, not a bracket expression that would
+  # match on stray letters, and the marker sits on its own line.
+  if grep -Fxq -- "$2" "$3" 2>/dev/null; then pass "$1"; else fail "$1"; fi
+}
+
 check_absent() { # name, forbidden-substring, file
   # An empty or missing file would satisfy "not present" without proving
   # anything, so require real content before believing the absence.
@@ -76,8 +82,8 @@ drive "$HOME_CORE" "$WORK/core.tty" \
   "echo HELLO_FROM_TEST" "false" "(exit 42)" "echo 中文測試" "tlogger_note MARKED"
 LOG_CORE="$(newest_log "$HOME_CORE")"
 check "command output is recorded"      "HELLO_FROM_TEST"  "$LOG_CORE"
-check "a failing command records 1"     "[exit:1]"         "$LOG_CORE"
-check "an explicit status is recorded"  "[exit:42]"        "$LOG_CORE"
+check_line "a failing command records 1"     "[exit:1]"  "$LOG_CORE"
+check_line "an explicit status is recorded"  "[exit:42]" "$LOG_CORE"
 check "utf-8 survives"                  "中文測試"          "$LOG_CORE"
 check "notes are recorded"              "### NOTE"         "$LOG_CORE"
 if [ "$(stat -c %a "$LOG_CORE" 2>/dev/null)" = 600 ]; then

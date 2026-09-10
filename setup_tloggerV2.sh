@@ -188,6 +188,7 @@ _tlogger_pty_sync() {
 }
 
 _tlogger_pty_run() {
+  setopt local_options no_err_exit unset
   local _tlogger_cmd="\$1"
   shift
   local _tlogger_real="\${TLOGGER_PTY_ORIG[\$_tlogger_cmd]:-command \$_tlogger_cmd}"
@@ -206,17 +207,21 @@ _tlogger_pty_run() {
     eval "\$_tlogger_real \\"\\\$@\\""
     return \$?
   }
-  local _tlogger_rc=0
-  {
-    # -f flushes after every write: without it the transcript can still be
-    # sitting in a buffer when the terminal is killed, leaving nothing to
-    # recover even though the screen showed the output.
-    script -qef -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
-    _tlogger_rc=\$?
-    [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
-  } always {
+  # -f flushes after every write: without it the transcript can still be
+  # sitting in a buffer when the terminal is killed, leaving nothing to
+  # recover even though the screen showed the output.
+  script -qef -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
+  local _tlogger_rc=\$?
+  if [[ ! -s "\$_tlogger_tmp" ]]; then
     rm -f "\$_tlogger_tmp"
-  }
+  elif _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG" 2>/dev/null; then
+    rm -f "\$_tlogger_tmp"
+  else
+    # The merge failed (a full disk): keep the transcript, it is the only
+    # copy. This shell's next tlogger_start, or another shell's once this one
+    # exits, recovers it. Deleting it here is the data loss we are avoiding.
+    echo "[tlogger] could not save the captured session to the log; kept at \$_tlogger_tmp" >&2
+  fi
   return \$_tlogger_rc
 }
 
@@ -230,19 +235,29 @@ _tlogger_pty_sync
 # terminal killed mid-command leaves its transcript stranded in the temp
 # file. Pick up anything left behind by a shell that is no longer running.
 _tlogger_recover_orphans() {
-  setopt local_options null_glob
-  local _f _pid _claim
+  setopt local_options null_glob unset
+  local _f _pid _claim _claimpid
   for _f in "\${TMPDIR:-/tmp}"/tlogger_pty.*(.N); do
-    [[ "\$_f" == *.claimed.* ]] && continue
-    _pid="\${\${_f:t}#tlogger_pty.}"
-    _pid="\${_pid%%.*}"
-    [[ "\$_pid" == <-> ]] || continue
-    kill -0 "\$_pid" 2>/dev/null && continue
+    if [[ "\$_f" == *.claimed.* ]]; then
+      # A claim left behind by a recoverer that died before merging. If its
+      # claimer is still alive, leave it be; otherwise re-process it, or its
+      # contents would be skipped forever.
+      _claimpid="\${_f##*.claimed.}"
+      [[ "\$_claimpid" == <-> ]] && kill -0 "\$_claimpid" 2>/dev/null && continue
+      _pid="\${\${_f:t}#tlogger_pty.}"
+      _pid="\${_pid%%.*}"
+      _claim="\$_f"
+    else
+      _pid="\${\${_f:t}#tlogger_pty.}"
+      _pid="\${_pid%%.*}"
+      [[ "\$_pid" == <-> ]] || continue
+      kill -0 "\$_pid" 2>/dev/null && continue
 
-    # Claim by rename: whoever wins the rename owns the file, so two
-    # terminals starting at once cannot both import the same transcript.
-    _claim="\${_f}.claimed.\$\$"
-    mv -- "\$_f" "\$_claim" 2>/dev/null || continue
+      # Claim by rename: whoever wins the rename owns the file, so two
+      # terminals starting at once cannot both import the same transcript.
+      _claim="\${_f}.claimed.\$\$"
+      mv -- "\$_f" "\$_claim" 2>/dev/null || continue
+    fi
 
     if [[ -s "\$_claim" ]]; then
       # Only drop the source once it is safely in the log: on a full disk
@@ -264,6 +279,7 @@ _tlogger_recover_orphans() {
 }
 
 tlogger_pty() {
+  setopt local_options no_err_exit unset
   local _c _tlogger_changed=0
   case "\$1" in
     add)
@@ -482,6 +498,7 @@ TLOGGER_INTERACTIVE_CMDS=(
 
 
 tlogger_start() {
+  setopt local_options no_err_exit unset
   [[ -n "\$TLOGGER_ACTIVE" ]] && return
   local _dir="\$HOME/Desktop/logs"
   if ! mkdir -p "\$_dir" 2>/dev/null || [[ ! -d "\$_dir" ]]; then
@@ -513,6 +530,7 @@ tlogger_start() {
 }
 
 tlogger_stop() {
+  setopt local_options no_err_exit unset
   [[ -z "\$TLOGGER_ACTIVE" ]] && return
   unset TLOGGER_ACTIVE
   # Without this the pending exit line is printed by the next precmd, when
@@ -524,6 +542,7 @@ tlogger_stop() {
 }
 
 tlogger_status() {
+  setopt local_options no_err_exit unset
   local _mode="manual"
   [[ "\$TLOGGER_AUTOSTART" -eq 1 ]] && _mode="automatic"
   if [[ -n "\$TLOGGER_ACTIVE" ]]; then
@@ -538,6 +557,7 @@ tlogger_status() {
 }
 
 tlogger_note() {
+  setopt local_options no_err_exit unset
   if [[ -z "\$*" ]]; then
     echo "usage: tlogger_note <message>"
     return 1
@@ -563,6 +583,7 @@ tlogger_note() {
 }
 
 tlogger_mode() {
+  setopt local_options no_err_exit unset
   case "\$1" in
     auto|automatic)
       export TLOGGER_AUTOSTART=1
@@ -582,6 +603,7 @@ tlogger_mode() {
 
 
 tlogger_grep() {
+  setopt local_options no_err_exit unset
   if [[ -z "\$1" ]]; then
     echo "usage: tlogger_grep <pattern>"
     return 1

@@ -171,7 +171,9 @@ _tlogger_clean_ansi() {
     -e 's|\\x1B\\[[0-9;:<=>?]*[ -/]*[@-~]||g' \
     -e 's|\\x1B[=>McD78EHZ]||g' \
     -e 's|\\r\$||' \
-    -e '/^Script (started|done) on .*\\[.*\\]\$/d'
+    -e '/^Script (started|done) on .*\\[.*\\]\$/d' \
+    | tr -d '\\000-\\010\\013\\014\\016-\\037\\177' \
+    | iconv -c -f UTF-8 -t UTF-8
 }
 
 autoload -Uz add-zsh-hook
@@ -283,6 +285,15 @@ tlogger_pty() {
           echo "[tlogger] \$_c is already captured"
           continue
         fi
+        # A builtin has to run in this shell; routing it through a pty would
+        # execute it in a child, where cd or export changes nothing here.
+        if (( \${+builtins[\$_c]} )) || (( \${reswords[(I)\$_c]} )); then
+          echo "[tlogger] \$_c is a shell builtin and must run in this shell — not added"
+          continue
+        fi
+        if ! command -v "\$_c" >/dev/null 2>&1 && [[ -z "\${aliases[\$_c]}" ]]; then
+          echo "[tlogger] warning: \$_c was not found in PATH — adding anyway"
+        fi
         TLOGGER_PTY_CMDS+=("\$_c")
         _tlogger_pty_alias "\$_c"
         echo "[tlogger] \$_c is now captured through a pty"
@@ -324,7 +335,7 @@ tlogger_grep() {
     echo "usage: tlogger_grep <pattern>"
     return 1
   fi
-  grep -n --color=auto -H -- "\$@" "\$HOME"/Desktop/logs/session_*_UTC.log 2>/dev/null
+  grep -an --color=auto -H -- "\$@" "\$HOME"/Desktop/logs/session_*_UTC.log 2>/dev/null
 }
 
 # Taking over a command name would silently drop an alias the user already

@@ -42,7 +42,7 @@ To uninstall (only removes the tlogger block from `.zshrc`, your other edits are
 | `tlogger_grep <pattern>` | Search across all session logs at once |
 | `tlogger_pty [list\|add\|remove]` | Manage which commands are captured through a pty |
 
-Logs are written to `~/Desktop/logs/session_<UTC_TIMESTAMP>_UTC.log`. Each command entry also records its exit code (`[exit:N]`), and SSH sessions are captured in full — see below.
+Logs are written to `~/Desktop/logs/session_<UTC_TIMESTAMP>_<PID>_UTC.log` — one file per terminal, so several open at once never write into the same log. Each command entry also records its exit code (`[exit:N]`), and SSH sessions are captured in full — see below.
 
 ## Recording more interactive tools
 

@@ -207,7 +207,9 @@ tlogger_start() {
   [[ -n "\$TLOGGER_ACTIVE" ]] && return
   mkdir -p "\$HOME/Desktop/logs"
   unset TLOGGER_PAUSED
-  export TLOGGER_LOG="\$HOME/Desktop/logs/session_\$(date -u +%Y%m%d_%H%M%S)_UTC.log"
+  # The pid keeps two terminals opened in the same second apart; without it
+  # they share a file and their commands interleave.
+  export TLOGGER_LOG="\$HOME/Desktop/logs/session_\$(date -u +%Y%m%d_%H%M%S)_\$\$_UTC.log"
   export TLOGGER_ACTIVE=1
   echo "[+] Logging started"
   echo "[+] Log file: \$TLOGGER_LOG"

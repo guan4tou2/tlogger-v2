@@ -121,6 +121,19 @@ if [ "$(tr -d '\r' < "$WORK/tty.tty" | grep -ac '^PIPE$')" = 0 ]; then
 else
   fail "bare, env-wrapped and absolute paths all keep a tty"
 fi
+# a prefixed command must not print tlogger's own working variables
+check_absent "wrapper handling keeps its variables to itself" "_tlogger_" "$WORK/tty.tty"
+
+if command -v proxychains >/dev/null 2>&1; then
+  HOME_PC="$WORK/proxychains"
+  install_into "$HOME_PC" 2 n
+  drive "$HOME_PC" "$WORK/pc.tty" "proxychains -q python3 -c \"$PROBE\""
+  if [ "$(tr -d '\r' < "$WORK/pc.tty" | grep -ac '^PIPE$')" = 0 ]; then
+    pass "proxychains is seen through like any other wrapper"
+  else
+    fail "proxychains is seen through like any other wrapper"
+  fi
+fi
 
 echo
 echo "job control is left alone"

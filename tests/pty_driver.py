@@ -8,14 +8,18 @@ already looks redirected and the interesting behaviour disappears.
 usage: pty_driver.py <HOME> <transcript> [command ...]
        a command of __CTRLZ__ / __CTRLC__ / __ESC__ sends that key instead.
 """
+import fcntl
 import os
 import pty
 import select
+import struct
 import sys
+import termios
 import time
 
 KEYS = {"__CTRLZ__": b"\x1a", "__CTRLC__": b"\x03", "__ESC__": b"\x1b"}
 SETTLE = float(os.environ.get("TLOGGER_TEST_SETTLE", "2"))
+ROWS, COLS = 40, 120
 
 
 def main() -> int:
@@ -26,6 +30,11 @@ def main() -> int:
         os.environ["TERM"] = "xterm"
         os.chdir(home)
         os.execvp("zsh", ["zsh", "-i"])
+
+    # A pty starts out 0x0. Full-screen programs and prompt libraries ask the
+    # terminal how big it is and stall or misdraw when the answer is nothing,
+    # which looks exactly like the program hanging.
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
     seen = bytearray()
 

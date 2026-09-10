@@ -468,6 +468,10 @@ TLOGGER_INTERACTIVE_CMDS=(
   ssh telnet ftp
   smbclient evil-winrm
   msfconsole
+  ligolo-proxy ligolo-agent ligolo-ng ligolo-mp ligolo-mp-client
+  impacket-psexec impacket-smbexec impacket-wmiexec impacket-atexec
+  impacket-dcomexec impacket-mssqlclient impacket-smbclient
+  rlwrap gdb r2 radare2
   mysql psql mongo redis-cli
   python3 python python2 ipython
   irb pry
@@ -640,6 +644,10 @@ tlogger_preexec() {
   # "env -i PATH=/usr/bin vim" - and compare the basename, so /usr/bin/vim
   # is recognised as vim.
   local _tlogger_first="\${_tlogger_words[1]}"
+  # Declared once: re-running local on a name that already holds a value
+  # makes zsh print it, so declaring inside the loop leaked
+  # _tlogger_optarg=... onto the terminal for every prefixed command.
+  local _tlogger_wrap _tlogger_optarg
   while (( \${#_tlogger_words} )); do
     # Test for an assignment on the raw word: :t on PATH=/usr/bin would
     # leave "bin" and the assignment would no longer be recognised.
@@ -647,11 +655,13 @@ tlogger_preexec() {
       shift _tlogger_words
       continue
     fi
-    local _tlogger_wrap="\${_tlogger_words[1]:t}" _tlogger_optarg
+    _tlogger_wrap="\${_tlogger_words[1]:t}"
+    _tlogger_optarg=''
     case "\$_tlogger_wrap" in
       # Which options take a separate value depends on the wrapper: nice -n
       # consumes a number, while sudo -n is a flag on its own.
       sudo|doas) _tlogger_optarg='-u -g -U -C -p -r -t -h -R' ;;
+      proxychains|proxychains4) _tlogger_optarg='-f' ;;
       env)       _tlogger_optarg='-u -C -S' ;;
       nice)      _tlogger_optarg='-n' ;;
       command|nohup|time|stdbuf) _tlogger_optarg='' ;;

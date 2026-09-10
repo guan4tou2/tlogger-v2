@@ -25,7 +25,15 @@ check() { # name, expected-substring, file
 }
 
 check_absent() { # name, forbidden-substring, file
-  if grep -qa -- "$2" "$3" 2>/dev/null; then fail "$1"; else pass "$1"; fi
+  # An empty or missing file would satisfy "not present" without proving
+  # anything, so require real content before believing the absence.
+  if [ ! -s "$3" ]; then
+    fail "$1 (nothing was recorded at all)"
+  elif grep -qa -- "$2" "$3" 2>/dev/null; then
+    fail "$1"
+  else
+    pass "$1"
+  fi
 }
 
 # install <home> <mode 1|2> <pty y|n>
@@ -147,7 +155,12 @@ if [ -f "$WORK/shape_y/.zshrc" ]; then
   check "a captured session records its output"   "Connection refused" "$LOG_PTY"
   check "a wrapper-invoked one says why it did not" "bypasses the pty wrapper" "$LOG_PTY"
   check "builtins are refused"                    "is a shell builtin"  "$WORK/pty.tty"
-  check "cd still works after that refusal"       "/tmp"                "$LOG_PTY"
+  # the pwd output on its own line, not just any path that mentions /tmp
+  if grep -qa '^/tmp$' "$LOG_PTY" 2>/dev/null; then
+    pass "cd still works after that refusal"
+  else
+    fail "cd still works after that refusal"
+  fi
 
   echo
   echo "interrupted captures are recovered"

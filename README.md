@@ -10,7 +10,7 @@ A zsh terminal session logger built for OSCP / penetration testing exam document
 
 - **Salar** — original creation, April 2022
 - **Ph03n1x** ([blog post](https://ph03n1x.net/tlogger-on-steroids/)) — enhanced and extended, December 2025
-- **[guan4tou2](https://github.com/guan4tou2)** — bug fixes, macOS compatibility patch, and new features, 2026
+- **[guan4tou2](https://github.com/guan4tou2)** — bug fixes, pty capture, and the rest of what is here, 2026
 
 This repo is a fork/continuation of Ph03n1x's `tlogger-on-steroids`, published with his permission.
 

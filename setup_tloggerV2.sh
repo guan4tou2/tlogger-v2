@@ -119,12 +119,21 @@ While logging:
   tlogger_note "found creds"  drop a marker into the log
   tlogger_grep <pattern>      search every session log
   tlogger_mode auto|manual    switch mode without reinstalling
-  tlogger_pty add <cmd>       capture an interactive command through a pty
 
 Logs:
-  ~/Desktop/logs/session_<UTC_TIMESTAMP>_UTC.log
+  ~/Desktop/logs/session_<UTC_TIMESTAMP>_<PID>_UTC.log
+  One file per terminal; each entry ends with its exit code.
 
 USAGE
+  # Only listed when it exists - a minimal install has no such command.
+  if [ "${WANT_PTY:-0}" -eq 1 ]; then
+cat <<'PTYUSAGE'
+Pty capture:
+  tlogger_pty list            show which commands are captured
+  tlogger_pty add <cmd>       capture one through a pty (this shell only)
+
+PTYUSAGE
+  fi
 }
 
 print_reload_hint() {
@@ -261,8 +270,8 @@ tlogger_pty() {
       shift
       [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty add <cmd>..."; return 1; }
       for _c in "\$@"; do
-        # The name is written into .zshrc, so anything outside a plain
-        # command name could break the file on the next shell start.
+        # The name becomes an alias, so keep it to something that can
+        # actually be one.
         # Strip every allowed character; anything left over is not a name we
         # can safely write into .zshrc. Avoids depending on extended_glob.
         if [[ -z "\$_c" || -n "\${_c//[A-Za-z0-9_.+-]/}" ]]; then

@@ -410,7 +410,6 @@ tlogger_preexec() {
   exec > >(
     tee >( _tlogger_clean_ansi >> "\$TLOGGER_LOG" )
   ) 2>&1
-  disown %+ 2>/dev/null
 }
 
 tlogger_precmd() {

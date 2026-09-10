@@ -122,8 +122,26 @@ print_reload_hint() {
 }
 
 install() {
+  if ! command -v zsh >/dev/null 2>&1; then
+    echo -e "${RED}[!] zsh was not found on this system.${RESET}"
+    echo -e "    TLOGGER is built on zsh's precmd/preexec hooks and cannot run"
+    echo -e "    under bash or sh. Install zsh first: sudo apt install zsh"
+    exit 1
+  fi
+
   flash_banner
   ask_mode
+
+  case "$SHELL" in
+    *zsh) ;;
+    *)
+      echo
+      echo -e "${YELLOW}[i] Your login shell is $SHELL, not zsh.${RESET}"
+      echo -e "    TLOGGER only records inside zsh sessions. Switch with:"
+      echo -e "${GREEN}      chsh -s \$(command -v zsh)${RESET}"
+      ;;
+  esac
+
   mkdir -p "$LOGDIR"
 
   if [ ! -f "$BACKUP" ]; then

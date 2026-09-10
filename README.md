@@ -4,6 +4,8 @@ A zsh terminal session logger built for OSCP / penetration testing exam document
 
 **Target environment: Kali Linux.** It assumes zsh, GNU sed, iproute2 (`ip`), and a `tun0` VPN interface — i.e. a stock Kali exam/lab box.
 
+**zsh only.** The logger is built on zsh's `precmd`/`preexec` hooks and zsh parameter expansion, and installs into `~/.zshrc`. It does not work under bash or sh — a bash port would need `PROMPT_COMMAND` and `trap DEBUG` and a rewrite of the array handling. Kali has defaulted to zsh since 2020, so this is usually already the case; the installer checks and tells you if it isn't.
+
 ## Credits
 
 - **Salar** — original creation, April 2022

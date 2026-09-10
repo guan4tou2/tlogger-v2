@@ -83,6 +83,19 @@ ask_mode() {
   esac
 }
 
+ask_pty() {
+  echo
+  echo -e "${CYAN}Also capture interactive sessions through a pty?${RESET}"
+  echo -e "${GREEN}  y) Yes${RESET}  ssh sessions recorded in full, adds tlogger_pty"
+  echo -e "${YELLOW}  n) No ${RESET}  command output only, ~190 fewer lines in .zshrc"
+  echo
+  read -rp "Choice [y/N]: " WANT_PTY
+  case "$WANT_PTY" in
+    y|Y|yes|YES) WANT_PTY=1 ;;
+    *) WANT_PTY=0 ;;
+  esac
+}
+
 print_usage() {
 cat <<'USAGE'
 
@@ -121,6 +134,212 @@ print_reload_hint() {
   echo
 }
 
+write_pty_block() {
+  cat >> "$ZSHRC" <<EOF
+
+### TLOGGER PTY CAPTURE ###
+
+# Captured through a real pty via script(1): the session renders normally
+# on screen AND the full transcript goes into the log.
+# Add any interactive command you want recorded, e.g. (ssh msfconsole mysql)
+TLOGGER_PTY_CMDS=(ssh)
+
+# Taking over a command name would silently drop an alias the user already
+# had - Kali ships "ls --color=auto" - so remember it and keep using it.
+typeset -gA TLOGGER_PTY_ORIG
+
+_tlogger_pty_alias() {
+  local _c="\$1"
+  local _existing="\${aliases[\$_c]:-}"
+  # Sourcing .zshrc again would otherwise store our own wrapper as the
+  # "original" and the command would call itself until FUNCNEST is hit.
+  if [[ "\$_existing" == "_tlogger_pty_run "* ]]; then
+    :
+  elif [[ -n "\$_existing" ]]; then
+    # Take the current definition every time, so editing the alias and
+    # sourcing again is picked up instead of keeping the stale one.
+    TLOGGER_PTY_ORIG[\$_c]="\$_existing"
+  fi
+  alias "\$_c"="_tlogger_pty_run \$_c"
+}
+
+# On a reload, hand back any command that has since been taken off the list.
+_tlogger_pty_sync() {
+  local _c
+  for _c in "\${(@k)TLOGGER_PTY_ORIG}"; do
+    (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )) && continue
+    [[ "\${aliases[\$_c]:-}" == "_tlogger_pty_run "* ]] && alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
+    unset "TLOGGER_PTY_ORIG[\$_c]"
+  done
+  for _c in "\${(@k)aliases}"; do
+    [[ "\${aliases[\$_c]}" == "_tlogger_pty_run "* ]] || continue
+    (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )) && continue
+    unalias "\$_c" 2>/dev/null
+  done
+}
+
+_tlogger_pty_run() {
+  local _tlogger_cmd="\$1"
+  shift
+  local _tlogger_real="\${TLOGGER_PTY_ORIG[\$_tlogger_cmd]:-command \$_tlogger_cmd}"
+  # An alias body is shell text, so it has to be re-parsed rather than split
+  # into words: quoting, and expansions such as \$PWD that are meant to run
+  # at call time, only survive evaluation.
+  if [[ -z "\$TLOGGER_ACTIVE" ]] || [[ ! -t 0 ]] || [[ ! -t 1 ]] \
+     || ! command -v script >/dev/null 2>&1; then
+    eval "\$_tlogger_real \\"\\\$@\\""
+    return \$?
+  fi
+  local _tlogger_tmp
+  # The pid is in the name so an interrupted capture can be identified and
+  # recovered later; see _tlogger_recover_orphans.
+  _tlogger_tmp="\$(mktemp -t tlogger_pty.\$\$.XXXXXX)" || {
+    eval "\$_tlogger_real \\"\\\$@\\""
+    return \$?
+  }
+  local _tlogger_rc=0
+  {
+    # -f flushes after every write: without it the transcript can still be
+    # sitting in a buffer when the terminal is killed, leaving nothing to
+    # recover even though the screen showed the output.
+    script -qef -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
+    _tlogger_rc=\$?
+    [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
+  } always {
+    rm -f "\$_tlogger_tmp"
+  }
+  return \$_tlogger_rc
+}
+
+for _tlogger_pc in \$TLOGGER_PTY_CMDS; do
+  _tlogger_pty_alias "\$_tlogger_pc"
+done
+unset _tlogger_pc
+_tlogger_pty_sync
+
+# A pty capture is only merged into the log once the command finishes, so a
+# terminal killed mid-command leaves its transcript stranded in the temp
+# file. Pick up anything left behind by a shell that is no longer running.
+_tlogger_recover_orphans() {
+  setopt local_options null_glob
+  local _f _pid _claim
+  for _f in "\${TMPDIR:-/tmp}"/tlogger_pty.*(.N); do
+    [[ "\$_f" == *.claimed.* ]] && continue
+    _pid="\${\${_f:t}#tlogger_pty.}"
+    _pid="\${_pid%%.*}"
+    [[ "\$_pid" == <-> ]] || continue
+    kill -0 "\$_pid" 2>/dev/null && continue
+
+    # Claim by rename: whoever wins the rename owns the file, so two
+    # terminals starting at once cannot both import the same transcript.
+    _claim="\${_f}.claimed.\$\$"
+    mv -- "\$_f" "\$_claim" 2>/dev/null || continue
+
+    if [[ -s "\$_claim" ]]; then
+      # Only drop the source once it is safely in the log: on a full disk
+      # this is the sole copy of that session.
+      if printf "\\n### RECOVERED from an interrupted capture (pid %s) ###\\n" "\$_pid" \
+           >> "\$TLOGGER_LOG" 2>/dev/null \
+         && _tlogger_clean_ansi < "\$_claim" >> "\$TLOGGER_LOG" 2>/dev/null; then
+        rm -f -- "\$_claim"
+      else
+        echo "[tlogger] could not write recovered transcript; kept at \$_claim" >&2
+        mv -- "\$_claim" "\$_f" 2>/dev/null
+        return 1
+      fi
+    else
+      rm -f -- "\$_claim"
+    fi
+  done
+  return 0
+}
+
+tlogger_pty() {
+  local _c _tlogger_changed=0
+  case "\$1" in
+    add)
+      shift
+      [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty add <cmd>..."; return 1; }
+      for _c in "\$@"; do
+        # The name is written into .zshrc, so anything outside a plain
+        # command name could break the file on the next shell start.
+        # Strip every allowed character; anything left over is not a name we
+        # can safely write into .zshrc. Avoids depending on extended_glob.
+        if [[ -z "\$_c" || -n "\${_c//[A-Za-z0-9_.+-]/}" ]]; then
+          echo "[tlogger] \$_c is not a plain command name — not added"
+          continue
+        fi
+        if (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
+          echo "[tlogger] \$_c is already captured"
+          continue
+        fi
+        # A builtin has to run in this shell; routing it through a pty would
+        # execute it in a child, where cd or export changes nothing here.
+        if (( \${+builtins[\$_c]} )) || (( \${reswords[(I)\$_c]} )); then
+          echo "[tlogger] \$_c is a shell builtin and must run in this shell — not added"
+          continue
+        fi
+        # A function lives in this shell only; "command" inside the wrapper
+        # would look for an external program of that name and find nothing.
+        if (( \${+functions[\$_c]} )); then
+          echo "[tlogger] \$_c is a shell function and cannot be run through a pty — not added"
+          continue
+        fi
+        if ! command -v "\$_c" >/dev/null 2>&1 && [[ -z "\${aliases[\$_c]}" ]]; then
+          echo "[tlogger] warning: \$_c was not found in PATH — adding anyway"
+        fi
+        TLOGGER_PTY_CMDS+=("\$_c")
+        _tlogger_changed=1
+        _tlogger_pty_alias "\$_c"
+        echo "[tlogger] \$_c is now captured through a pty"
+        # script(1) owns the pty, so Ctrl-Z stops inside it instead of
+        # handing the shell back. It matters most for a caught shell, where
+        # Ctrl-Z then "stty raw -echo; fg" is the usual upgrade.
+        echo "           note: Ctrl-Z will not suspend \$_c while it is captured"
+      done
+      (( _tlogger_changed )) && cat <<'TLHINT'
+[tlogger] this shell only. To keep it, edit the TLOGGER_PTY_CMDS line in
+          ~/.zshrc - tlogger does not rewrite your config while running.
+TLHINT
+      ;;
+    remove|rm)
+      shift
+      [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty remove <cmd>..."; return 1; }
+      for _c in "\$@"; do
+        if (( ! \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
+          echo "[tlogger] \$_c is not in the list"
+          continue
+        fi
+        TLOGGER_PTY_CMDS=("\${(@)TLOGGER_PTY_CMDS:#\$_c}")
+        _tlogger_changed=1
+        if [[ -n "\${TLOGGER_PTY_ORIG[\$_c]:-}" ]]; then
+          alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
+          unset "TLOGGER_PTY_ORIG[\$_c]"
+        else
+          unalias "\$_c" 2>/dev/null
+        fi
+        echo "[tlogger] \$_c is no longer captured"
+      done
+      (( _tlogger_changed )) && cat <<'TLHINT'
+[tlogger] this shell only. To keep it, edit the TLOGGER_PTY_CMDS line in
+          ~/.zshrc - tlogger does not rewrite your config while running.
+TLHINT
+      ;;
+    ''|list)
+      echo "[tlogger] captured through a pty: \$TLOGGER_PTY_CMDS"
+      echo "          add more with: tlogger_pty add <cmd>..."
+      ;;
+    *)
+      echo "usage: tlogger_pty [list|add <cmd>...|remove <cmd>...]"
+      return 1
+      ;;
+  esac
+}
+
+### TLOGGER PTY CAPTURE END ###
+EOF
+}
+
 install() {
   if ! command -v zsh >/dev/null 2>&1; then
     echo -e "${RED}[!] zsh was not found on this system.${RESET}"
@@ -131,6 +350,7 @@ install() {
 
   flash_banner
   ask_mode
+  ask_pty
 
   case "$SHELL" in
     *zsh) ;;
@@ -222,14 +442,12 @@ autoload -Uz add-zsh-hook
 # Assigning the array also makes a second source of this file idempotent.
 precmd_functions=(tlogger_capture_exit \${precmd_functions:#tlogger_capture_exit})
 
-# Captured through a real pty via script(1): the session renders normally
-# on screen AND the full transcript goes into the log.
-# Add any interactive command you want recorded, e.g. (ssh msfconsole mysql)
-TLOGGER_PTY_CMDS=(ssh)
+
+# Empty unless the pty block below is installed, which is what fills it in.
+TLOGGER_PTY_CMDS=()
 
 # Skipped entirely: these run straight against the terminal and are not
 # recorded, because piping them through tee breaks their rendering.
-# Move a command from here into TLOGGER_PTY_CMDS to record it instead.
 TLOGGER_INTERACTIVE_CMDS=(
   vim vi nvim nano emacs
   less more man
@@ -246,42 +464,6 @@ TLOGGER_INTERACTIVE_CMDS=(
   nc ncat netcat
 )
 
-# A pty capture is only merged into the log once the command finishes, so a
-# terminal killed mid-command leaves its transcript stranded in the temp
-# file. Pick up anything left behind by a shell that is no longer running.
-_tlogger_recover_orphans() {
-  setopt local_options null_glob
-  local _f _pid _claim
-  for _f in "\${TMPDIR:-/tmp}"/tlogger_pty.*(.N); do
-    [[ "\$_f" == *.claimed.* ]] && continue
-    _pid="\${\${_f:t}#tlogger_pty.}"
-    _pid="\${_pid%%.*}"
-    [[ "\$_pid" == <-> ]] || continue
-    kill -0 "\$_pid" 2>/dev/null && continue
-
-    # Claim by rename: whoever wins the rename owns the file, so two
-    # terminals starting at once cannot both import the same transcript.
-    _claim="\${_f}.claimed.\$\$"
-    mv -- "\$_f" "\$_claim" 2>/dev/null || continue
-
-    if [[ -s "\$_claim" ]]; then
-      # Only drop the source once it is safely in the log: on a full disk
-      # this is the sole copy of that session.
-      if printf "\\n### RECOVERED from an interrupted capture (pid %s) ###\\n" "\$_pid" \
-           >> "\$TLOGGER_LOG" 2>/dev/null \
-         && _tlogger_clean_ansi < "\$_claim" >> "\$TLOGGER_LOG" 2>/dev/null; then
-        rm -f -- "\$_claim"
-      else
-        echo "[tlogger] could not write recovered transcript; kept at \$_claim" >&2
-        mv -- "\$_claim" "\$_f" 2>/dev/null
-        return 1
-      fi
-    else
-      rm -f -- "\$_claim"
-    fi
-  done
-  return 0
-}
 
 tlogger_start() {
   [[ -n "\$TLOGGER_ACTIVE" ]] && return
@@ -303,7 +485,7 @@ tlogger_start() {
   export TLOGGER_ACTIVE=1
   echo "[+] Logging started"
   echo "[+] Log file: \$TLOGGER_LOG"
-  _tlogger_recover_orphans
+  (( \${+functions[_tlogger_recover_orphans]} )) && _tlogger_recover_orphans
 }
 
 tlogger_stop() {
@@ -374,138 +556,6 @@ tlogger_mode() {
   esac
 }
 
-# Apply this shell's additions and removals to whatever is on disk now,
-# under a lock, so two terminals editing the list do not overwrite each
-# other with their own stale copy.
-_tlogger_persist_pty_cmds() {
-  local -a _added=("\${(@P)1}") _removed=("\${(@P)2}")
-  # :A resolves symlinks - editing the link itself would replace it with a
-  # regular file and orphan the dotfile it points at.
-  local _zshrc="\$HOME/.zshrc"
-  _zshrc="\${_zshrc:A}"
-  [[ -f "\$_zshrc" ]] || return 1
-  grep -q '^TLOGGER_PTY_CMDS=(' "\$_zshrc" || return 1
-
-  local _lock="\${_zshrc}.tlogger.lock" _tries=0 _owner
-  while ! mkdir "\$_lock" 2>/dev/null; do
-    # A shell killed while holding the lock would otherwise block every
-    # later save for good, so take it over once its owner is gone.
-    _owner=\$(cat "\$_lock/pid" 2>/dev/null)
-    if [[ -z "\$_owner" ]] || ! kill -0 "\$_owner" 2>/dev/null; then
-      rm -rf "\$_lock" 2>/dev/null
-      continue
-    fi
-    (( ++_tries > 30 )) && { echo "[tlogger] config is locked by pid \$_owner; not saved" >&2; return 1; }
-    sleep 0.1
-  done
-  echo \$\$ > "\$_lock/pid" 2>/dev/null
-
-  {
-    local _line _disk
-    _line=\$(grep -m1 '^TLOGGER_PTY_CMDS=(' "\$_zshrc")
-    # The parentheses have to be escaped: unquoted they are read as glob
-    # grouping and zsh rejects the pattern outright.
-    _disk="\${_line#*\\(}"
-    _disk="\${_disk%\\)*}"
-    local -a _list=(\${=_disk}) _c
-    for _c in "\$_added[@]"; do
-      (( \${_list[(I)\$_c]} )) || _list+=("\$_c")
-    done
-    for _c in "\$_removed[@]"; do
-      _list=("\${(@)_list:#\$_c}")
-    done
-
-    local _tmp="\${_zshrc}.tlogger.new"
-    if sed "s|^TLOGGER_PTY_CMDS=(.*)\$|TLOGGER_PTY_CMDS=(\${_list})|" "\$_zshrc" > "\$_tmp" \
-       && zsh -n "\$_tmp" 2>/dev/null; then
-      cat "\$_tmp" > "\$_zshrc" && echo "[tlogger] saved — other terminals pick this up on restart"
-      rm -f "\$_tmp"
-    else
-      rm -f "\$_tmp"
-      echo "[tlogger] refusing to write an unparsable .zshrc; nothing saved" >&2
-      return 1
-    fi
-  } always {
-    rm -rf "\$_lock" 2>/dev/null
-  }
-}
-
-tlogger_pty() {
-  local _c
-  local -a _tlogger_added _tlogger_removed
-  case "\$1" in
-    add)
-      shift
-      [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty add <cmd>..."; return 1; }
-      for _c in "\$@"; do
-        # The name is written into .zshrc, so anything outside a plain
-        # command name could break the file on the next shell start.
-        # Strip every allowed character; anything left over is not a name we
-        # can safely write into .zshrc. Avoids depending on extended_glob.
-        if [[ -z "\$_c" || -n "\${_c//[A-Za-z0-9_.+-]/}" ]]; then
-          echo "[tlogger] \$_c is not a plain command name — not added"
-          continue
-        fi
-        if (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
-          echo "[tlogger] \$_c is already captured"
-          continue
-        fi
-        # A builtin has to run in this shell; routing it through a pty would
-        # execute it in a child, where cd or export changes nothing here.
-        if (( \${+builtins[\$_c]} )) || (( \${reswords[(I)\$_c]} )); then
-          echo "[tlogger] \$_c is a shell builtin and must run in this shell — not added"
-          continue
-        fi
-        # A function lives in this shell only; "command" inside the wrapper
-        # would look for an external program of that name and find nothing.
-        if (( \${+functions[\$_c]} )); then
-          echo "[tlogger] \$_c is a shell function and cannot be run through a pty — not added"
-          continue
-        fi
-        if ! command -v "\$_c" >/dev/null 2>&1 && [[ -z "\${aliases[\$_c]}" ]]; then
-          echo "[tlogger] warning: \$_c was not found in PATH — adding anyway"
-        fi
-        TLOGGER_PTY_CMDS+=("\$_c")
-        _tlogger_added+=("\$_c")
-        _tlogger_pty_alias "\$_c"
-        echo "[tlogger] \$_c is now captured through a pty"
-        # script(1) owns the pty, so Ctrl-Z stops inside it instead of
-        # handing the shell back. It matters most for a caught shell, where
-        # Ctrl-Z then "stty raw -echo; fg" is the usual upgrade.
-        echo "           note: Ctrl-Z will not suspend \$_c while it is captured"
-      done
-      (( \${#_tlogger_added} )) && _tlogger_persist_pty_cmds _tlogger_added _tlogger_removed
-      ;;
-    remove|rm)
-      shift
-      [[ \$# -eq 0 ]] && { echo "usage: tlogger_pty remove <cmd>..."; return 1; }
-      for _c in "\$@"; do
-        if (( ! \${TLOGGER_PTY_CMDS[(I)\$_c]} )); then
-          echo "[tlogger] \$_c is not in the list"
-          continue
-        fi
-        TLOGGER_PTY_CMDS=("\${(@)TLOGGER_PTY_CMDS:#\$_c}")
-        _tlogger_removed+=("\$_c")
-        if [[ -n "\${TLOGGER_PTY_ORIG[\$_c]:-}" ]]; then
-          alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
-          unset "TLOGGER_PTY_ORIG[\$_c]"
-        else
-          unalias "\$_c" 2>/dev/null
-        fi
-        echo "[tlogger] \$_c is no longer captured"
-      done
-      (( \${#_tlogger_removed} )) && _tlogger_persist_pty_cmds _tlogger_added _tlogger_removed
-      ;;
-    ''|list)
-      echo "[tlogger] captured through a pty: \$TLOGGER_PTY_CMDS"
-      echo "          add more with: tlogger_pty add <cmd>..."
-      ;;
-    *)
-      echo "usage: tlogger_pty [list|add <cmd>...|remove <cmd>...]"
-      return 1
-      ;;
-  esac
-}
 
 tlogger_grep() {
   if [[ -z "\$1" ]]; then
@@ -522,78 +572,6 @@ tlogger_grep() {
   grep -an --color=auto -H -- "\$@" "\${_logs[@]}" 2>/dev/null
 }
 
-# Taking over a command name would silently drop an alias the user already
-# had - Kali ships "ls --color=auto" - so remember it and keep using it.
-typeset -gA TLOGGER_PTY_ORIG
-
-_tlogger_pty_alias() {
-  local _c="\$1"
-  local _existing="\${aliases[\$_c]:-}"
-  # Sourcing .zshrc again would otherwise store our own wrapper as the
-  # "original" and the command would call itself until FUNCNEST is hit.
-  if [[ "\$_existing" == "_tlogger_pty_run "* ]]; then
-    :
-  elif [[ -n "\$_existing" ]]; then
-    # Take the current definition every time, so editing the alias and
-    # sourcing again is picked up instead of keeping the stale one.
-    TLOGGER_PTY_ORIG[\$_c]="\$_existing"
-  fi
-  alias "\$_c"="_tlogger_pty_run \$_c"
-}
-
-# On a reload, hand back any command that has since been taken off the list.
-_tlogger_pty_sync() {
-  local _c
-  for _c in "\${(@k)TLOGGER_PTY_ORIG}"; do
-    (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )) && continue
-    [[ "\${aliases[\$_c]:-}" == "_tlogger_pty_run "* ]] && alias "\$_c"="\${TLOGGER_PTY_ORIG[\$_c]}"
-    unset "TLOGGER_PTY_ORIG[\$_c]"
-  done
-  for _c in "\${(@k)aliases}"; do
-    [[ "\${aliases[\$_c]}" == "_tlogger_pty_run "* ]] || continue
-    (( \${TLOGGER_PTY_CMDS[(I)\$_c]} )) && continue
-    unalias "\$_c" 2>/dev/null
-  done
-}
-
-_tlogger_pty_run() {
-  local _tlogger_cmd="\$1"
-  shift
-  local _tlogger_real="\${TLOGGER_PTY_ORIG[\$_tlogger_cmd]:-command \$_tlogger_cmd}"
-  # An alias body is shell text, so it has to be re-parsed rather than split
-  # into words: quoting, and expansions such as \$PWD that are meant to run
-  # at call time, only survive evaluation.
-  if [[ -z "\$TLOGGER_ACTIVE" ]] || [[ ! -t 0 ]] || [[ ! -t 1 ]] \
-     || ! command -v script >/dev/null 2>&1; then
-    eval "\$_tlogger_real \\"\\\$@\\""
-    return \$?
-  fi
-  local _tlogger_tmp
-  # The pid is in the name so an interrupted capture can be identified and
-  # recovered later; see _tlogger_recover_orphans.
-  _tlogger_tmp="\$(mktemp -t tlogger_pty.\$\$.XXXXXX)" || {
-    eval "\$_tlogger_real \\"\\\$@\\""
-    return \$?
-  }
-  local _tlogger_rc=0
-  {
-    # -f flushes after every write: without it the transcript can still be
-    # sitting in a buffer when the terminal is killed, leaving nothing to
-    # recover even though the screen showed the output.
-    script -qef -c "\$_tlogger_real \${(j: :)\${(qq)@}}" "\$_tlogger_tmp"
-    _tlogger_rc=\$?
-    [[ -s "\$_tlogger_tmp" ]] && _tlogger_clean_ansi < "\$_tlogger_tmp" >> "\$TLOGGER_LOG"
-  } always {
-    rm -f "\$_tlogger_tmp"
-  }
-  return \$_tlogger_rc
-}
-
-for _tlogger_pc in \$TLOGGER_PTY_CMDS; do
-  _tlogger_pty_alias "\$_tlogger_pc"
-done
-unset _tlogger_pc
-_tlogger_pty_sync
 
 tlogger_preexec() {
   [[ -n "\${TLOGGER_ACTIVE:-}" ]] || return
@@ -702,6 +680,8 @@ add-zsh-hook precmd tlogger_precmd
 
 EOF
 
+  (( WANT_PTY )) && write_pty_block
+
   if [ "$THEME_DETECTED" -eq 1 ]; then
     echo -e "${CYAN}[i] A prompt framework was detected in your .zshrc.${RESET}"
     echo -e "    TLOGGER leaves your prompt alone — it will look exactly as it did"
@@ -718,7 +698,9 @@ EOF
 
 uninstall() {
   if grep -q "### TLOGGER FINAL CLEAN START ###" "$ZSHRC" 2>/dev/null; then
-    sed -i.tlogger_uninstall_bak '/### TLOGGER FINAL CLEAN START ###/,/### TLOGGER FINAL CLEAN END ###/d' "$ZSHRC"
+    sed -i.tlogger_uninstall_bak \
+      -e '/### TLOGGER FINAL CLEAN START ###/,/### TLOGGER FINAL CLEAN END ###/d' \
+      -e '/### TLOGGER PTY CAPTURE ###/,/### TLOGGER PTY CAPTURE END ###/d' "$ZSHRC"
     echo -e "${GREEN}[✓] TLOGGER uninstalled (only the TLOGGER block was removed, other .zshrc edits kept)${RESET}"
     echo -e "${CYAN}    Safety copy of the pre-uninstall .zshrc: ${ZSHRC}.tlogger_uninstall_bak${RESET}"
   else

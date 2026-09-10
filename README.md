@@ -21,10 +21,17 @@ chmod +x setup_tloggerV2.sh
 ./setup_tloggerV2.sh install
 ```
 
-You'll be asked to choose a mode:
+You'll be asked two things.
+
+Mode:
 
 - **Manual** — control logging yourself with `tlogger_start` / `tlogger_stop`
 - **Automatic** — logging starts on every new terminal
+
+Whether to also install pty capture:
+
+- **No** — command output only. About 190 fewer lines in your `.zshrc`, no `script(1)`, no temp files.
+- **Yes** — adds `tlogger_pty` and records `ssh` sessions in full.
 
 To uninstall (only removes the tlogger block from `.zshrc`, your other edits are kept):
 
@@ -55,7 +62,7 @@ TLOGGER_PTY_CMDS=(ssh)          # captured through a real pty, session goes into
 TLOGGER_INTERACTIVE_CMDS=(vim vi nvim nano ... )   # skipped, not recorded
 ```
 
-Manage the first list from the shell — the change applies immediately and is written back to `.zshrc`:
+Manage the list from the shell. The change applies to that shell only — tlogger never rewrites your config while it is running, so edit the `TLOGGER_PTY_CMDS` line in `.zshrc` to make it permanent:
 
 ```console
 $ tlogger_pty list
@@ -91,6 +98,14 @@ $ tlogger_pty add ls
 - If the remote box you SSH into runs a heavily customized shell (autosuggestions, syntax highlighting, a multi-line prompt), its constant line redraws show up in the captured transcript as duplicated fragments. A plain `bash` prompt — which is what you usually land on after popping a shell — records cleanly.
 - The regex used to strip ANSI escape codes from captured output is reasonably thorough but not a full terminal-sequence parser; a small number of exotic escape sequences may leak through.
 - Log files contain everything you type and everything captured commands print, in cleartext — including credentials passed on the command line. Treat log files as sensitive.
+
+## Tests
+
+```bash
+./tests/run_tests.sh
+```
+
+Each case installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
 
 ## License
 

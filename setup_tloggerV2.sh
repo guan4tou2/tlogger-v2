@@ -420,9 +420,11 @@ tlogger_capture_exit() {
   # that prints gets recorded as if the command had produced it.
   if [[ -n "\${TLOGGER_LAST_LOGGED:-}" && -n "\${TLOGGER_LOG:-}" ]]; then
     if [[ -n "\${TLOGGER_LAST_PIPED:-}" ]]; then
-      printf "[exit:%d]\\n" "\$TLOGGER_LAST_EXIT"
+      # Leading newline: output that ended without one would otherwise have
+      # the marker stuck to it, turning "hash" into "hash[exit:0]".
+      printf "\\n[exit:%d]\\n" "\$TLOGGER_LAST_EXIT" 2>/dev/null
     else
-      printf "[exit:%d]\\n" "\$TLOGGER_LAST_EXIT" >> "\$TLOGGER_LOG"
+      printf "\\n[exit:%d]\\n" "\$TLOGGER_LAST_EXIT" >> "\$TLOGGER_LOG" 2>/dev/null
     fi
     unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
   fi
@@ -484,6 +486,10 @@ tlogger_start() {
   # The pid keeps two terminals opened in the same second apart; without it
   # they share a file and their commands interleave.
   local _log="\$_dir/session_\$(date -u +%Y%m%d_%H%M%S)_\$\$_UTC.log"
+  if [[ -L "\$_log" ]]; then
+    echo "[tlogger] \$_log is a symlink; refusing to write through it" >&2
+    return 1
+  fi
   # 600: the log holds every command and its output, credentials included.
   if ! ( umask 077; : >> "\$_log" ) 2>/dev/null || [[ ! -w "\$_log" ]]; then
     echo "[tlogger] cannot write \$_log — logging NOT started" >&2

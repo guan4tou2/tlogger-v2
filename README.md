@@ -98,6 +98,7 @@ $ tlogger_pty add ls
 - If the remote box you SSH into runs a heavily customized shell (autosuggestions, syntax highlighting, a multi-line prompt), its constant line redraws show up in the captured transcript as duplicated fragments. A plain `bash` prompt — which is what you usually land on after popping a shell — records cleanly.
 - The regex used to strip ANSI escape codes from captured output is reasonably thorough but not a full terminal-sequence parser; a small number of exotic escape sequences may leak through.
 - Log files contain everything you type and everything captured commands print, in cleartext — including credentials passed on the command line. Treat log files as sensitive.
+- **A command's output can imitate tlogger's own markers.** Nothing distinguishes a `### NOTE ... ###` or `[exit:0]` line that tlogger wrote from one a command printed, so anything you run — including a program on a target box — can put convincing-looking markers into the log. It is your own record rather than tamper-evident evidence; if a specific line matters, keep the screenshot too.
 
 ## Tests
 
@@ -105,7 +106,7 @@ $ tlogger_pty add ls
 ./tests/run_tests.sh
 ```
 
-46 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
+50 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
 
 They cover both install shapes, both modes, exit codes, UTF-8, notes, log permissions, stop, prompt-plugin isolation, wrapper prefixes and quoting, job control, binary output, one-log-per-terminal, an unwritable log directory, alias preservation and reloading, pty capture, interrupted-capture recovery, the installer's edge cases and uninstall. Set `TLOGGER_TEST_SETTLE` to give each command longer on a slow machine.
 

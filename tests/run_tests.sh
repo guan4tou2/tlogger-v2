@@ -174,6 +174,36 @@ if [ -f "$WORK/shape_y/.zshrc" ]; then
 fi
 
 echo
+echo "hostile output"
+HOME_W="$WORK/weird"
+install_into "$HOME_W" 2 n
+drive "$HOME_W" "$WORK/weird.tty" \
+  "printf NO_TRAILING_NEWLINE" "echo AFTERWARDS" "exec 1>&-" "echo RECOVERED"
+LOG_W="$(newest_log "$HOME_W")"
+# the value must stay readable, not become NO_TRAILING_NEWLINE[exit:0]
+if grep -qa '^NO_TRAILING_NEWLINE$' "$LOG_W" 2>/dev/null; then
+  pass "output without a trailing newline is not glued to the marker"
+else
+  fail "output without a trailing newline is not glued to the marker"
+fi
+check_absent "closing stdout does not leak an internal error" "tlogger_capture_exit:" "$WORK/weird.tty"
+check "logging recovers after stdout is closed" "RECOVERED" "$LOG_W"
+
+HOME_SYM="$WORK/symlink"
+install_into "$HOME_SYM" 1 n
+mkdir -p "$HOME_SYM/Desktop/logs"
+printf 'MUST_NOT_BE_TOUCHED\n' > "$WORK/bystander.txt"
+# a symlink planted where the next log file will be created
+ln -s "$WORK/bystander.txt" "$HOME_SYM/Desktop/logs/session_planted_UTC.log"
+drive "$HOME_SYM" "$WORK/symlink.tty" \
+  "TLOGGER_LOG=$HOME_SYM/Desktop/logs/session_planted_UTC.log tlogger_start"
+if [ "$(cat "$WORK/bystander.txt")" = "MUST_NOT_BE_TOUCHED" ]; then
+  pass "a symlinked log path is refused, not written through"
+else
+  fail "a symlinked log path is refused, not written through"
+fi
+
+echo
 echo "manual mode"
 HOME_MAN="$WORK/manual"
 install_into "$HOME_MAN" 1 n

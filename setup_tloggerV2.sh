@@ -283,7 +283,11 @@ tlogger_note() {
     echo "[tlogger] not active — note not saved (run tlogger_start first)"
     return 1
   fi
-  printf "\\n### NOTE [%s] %s ###\\n" "\$(TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC')" "\$*" >> "\$TLOGGER_LOG"
+  if ! printf "\\n### NOTE [%s] %s ###\\n" \
+       "\$(TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC')" "\$*" >> "\$TLOGGER_LOG" 2>/dev/null; then
+    echo "[tlogger] could not write to \$TLOGGER_LOG — note NOT saved" >&2
+    return 1
+  fi
   echo "[+] Note saved"
 }
 
@@ -409,19 +413,17 @@ _tlogger_pty_run() {
   local _tlogger_cmd="\$1"
   shift
   local _tlogger_real="\${TLOGGER_PTY_ORIG[\$_tlogger_cmd]:-command \$_tlogger_cmd}"
-  # (z) splits the alias like the shell would, (Q) then removes one level of
-  # quoting so an alias body such as: foo "two words" keeps its argument
-  # intact instead of passing the quote characters through literally.
-  local -a _tlogger_argv
-  _tlogger_argv=(\${(Q)\${(z)_tlogger_real}})
+  # An alias body is shell text, so it has to be re-parsed rather than split
+  # into words: quoting, and expansions such as \$PWD that are meant to run
+  # at call time, only survive evaluation.
   if [[ -z "\$TLOGGER_ACTIVE" ]] || [[ ! -t 0 ]] || [[ ! -t 1 ]] \
      || ! command -v script >/dev/null 2>&1; then
-    "\${_tlogger_argv[@]}" "\$@"
+    eval "\$_tlogger_real \\"\\\$@\\""
     return \$?
   fi
   local _tlogger_tmp
   _tlogger_tmp="\$(mktemp -t tlogger_pty.XXXXXX)" || {
-    "\${_tlogger_argv[@]}" "\$@"
+    eval "\$_tlogger_real \\"\\\$@\\""
     return \$?
   }
   local _tlogger_rc=0
@@ -471,19 +473,49 @@ tlogger_preexec() {
     esac
   done
 
-  # Look past wrappers and assignments - "sudo vim", "env X=1 vim" - and
-  # compare the basename, so /usr/bin/vim is recognised as vim.
-  local _tlogger_cmd="\${_tlogger_words[1]}"
-  while [[ -n "\$_tlogger_cmd" ]] && \
-        { [[ "\$_tlogger_cmd" == (sudo|doas|env|command|nohup|stdbuf|time|nice) ]] \
-          || [[ "\$_tlogger_cmd" == *=* ]]; }; do
-    shift _tlogger_words 2>/dev/null || break
-    (( \${#_tlogger_words} )) || break
-    _tlogger_cmd="\${_tlogger_words[1]}"
+  # Look past wrappers, their options and assignments - "sudo -u kali vim",
+  # "env -i PATH=/usr/bin vim" - and compare the basename, so /usr/bin/vim
+  # is recognised as vim.
+  local _tlogger_first="\${_tlogger_words[1]}"
+  while (( \${#_tlogger_words} )); do
+    # Test for an assignment on the raw word: :t on PATH=/usr/bin would
+    # leave "bin" and the assignment would no longer be recognised.
+    if [[ "\${_tlogger_words[1]}" == *=* ]]; then
+      shift _tlogger_words
+      continue
+    fi
+    local _tlogger_wrap="\${_tlogger_words[1]:t}" _tlogger_optarg
+    case "\$_tlogger_wrap" in
+      # Which options take a separate value depends on the wrapper: nice -n
+      # consumes a number, while sudo -n is a flag on its own.
+      sudo|doas) _tlogger_optarg='-u -g -U -C -p -r -t -h -R' ;;
+      env)       _tlogger_optarg='-u -C -S' ;;
+      nice)      _tlogger_optarg='-n' ;;
+      command|nohup|time|stdbuf) _tlogger_optarg='' ;;
+      *) break ;;
+    esac
+    shift _tlogger_words
+    while (( \${#_tlogger_words} )) && [[ "\${_tlogger_words[1]}" == -* ]]; do
+      if [[ -n "\$_tlogger_optarg" && " \$_tlogger_optarg " == *" \${_tlogger_words[1]} "* ]]; then
+        shift _tlogger_words
+        (( \${#_tlogger_words} )) && [[ "\${_tlogger_words[1]}" != -* ]] \
+          && shift _tlogger_words
+      else
+        shift _tlogger_words
+      fi
+    done
   done
-  _tlogger_cmd="\${_tlogger_cmd:t}"
+  local _tlogger_cmd="\${_tlogger_words[1]:t}"
 
   if (( _tlogger_bare )); then
+    # The pty wrapper is an alias, so it only fires when the name is the
+    # first word. Through sudo/env or an absolute path it never runs, and
+    # skipping the general capture too would drop the session silently.
+    if (( \${TLOGGER_PTY_CMDS[(I)\$_tlogger_cmd]} )) \
+       && [[ "\$_tlogger_first" != "\$_tlogger_cmd" ]]; then
+      printf "[tlogger] session body not captured: %s ran via %s, which bypasses the pty wrapper\\n" \
+        "\$_tlogger_cmd" "\$_tlogger_first" >> "\$TLOGGER_LOG"
+    fi
     for _tlogger_ic in \$TLOGGER_INTERACTIVE_CMDS \$TLOGGER_PTY_CMDS; do
       [[ "\$_tlogger_cmd" == "\$_tlogger_ic" ]] && return
     done

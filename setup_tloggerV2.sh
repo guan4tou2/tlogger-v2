@@ -255,6 +255,9 @@ tlogger_start() {
 tlogger_stop() {
   [[ -z "\$TLOGGER_ACTIVE" ]] && return
   unset TLOGGER_ACTIVE
+  # Without this the pending exit line is printed by the next precmd, when
+  # stdout has already been handed back, so it lands on the screen.
+  unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
   export TLOGGER_PAUSED=1
   exec >/dev/tty 2>&1
   echo "[+] Logging stopped"
@@ -536,11 +539,19 @@ tlogger_precmd() {
     fi
     unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
   fi
+
+  # Hand stdout back before anything else, so whatever runs below prints to
+  # the terminal rather than into the previous command's capture.
+  [[ -n "\$TLOGGER_ACTIVE" ]] && exec >/dev/tty 2>&1
+
   if [[ "\$TLOGGER_AUTOSTART" -eq 1 && -z "\$TLOGGER_ACTIVE" && -z "\$TLOGGER_PAUSED" ]]; then
-    tlogger_start
+    # A failure here would otherwise be retried, and reported, before every
+    # single prompt for the rest of the session.
+    tlogger_start || {
+      export TLOGGER_PAUSED=1
+      echo "[tlogger] autostart disabled for this shell; fix the above and run tlogger_start" >&2
+    }
   fi
-  [[ -n "\$TLOGGER_ACTIVE" ]] || return
-  exec >/dev/tty 2>&1
 }
 
 add-zsh-hook preexec tlogger_preexec

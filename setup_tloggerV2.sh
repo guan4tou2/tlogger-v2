@@ -230,6 +230,26 @@ TLOGGER_INTERACTIVE_CMDS=(
   nc ncat netcat
 )
 
+# A pty capture is only merged into the log once the command finishes, so a
+# terminal killed mid-command leaves its transcript stranded in the temp
+# file. Pick up anything left behind by a shell that is no longer running.
+_tlogger_recover_orphans() {
+  setopt local_options null_glob
+  local _f _pid
+  for _f in "\${TMPDIR:-/tmp}"/tlogger_pty.*; do
+    _pid="\${\${_f:t}#tlogger_pty.}"
+    _pid="\${_pid%%.*}"
+    [[ "\$_pid" == <-> ]] || continue
+    kill -0 "\$_pid" 2>/dev/null && continue
+    if [[ -s "\$_f" ]]; then
+      printf "\\n### RECOVERED from an interrupted capture (pid %s) ###\\n" "\$_pid" \
+        >> "\$TLOGGER_LOG"
+      _tlogger_clean_ansi < "\$_f" >> "\$TLOGGER_LOG"
+    fi
+    rm -f "\$_f"
+  done
+}
+
 tlogger_start() {
   [[ -n "\$TLOGGER_ACTIVE" ]] && return
   local _dir="\$HOME/Desktop/logs"
@@ -250,6 +270,7 @@ tlogger_start() {
   export TLOGGER_ACTIVE=1
   echo "[+] Logging started"
   echo "[+] Log file: \$TLOGGER_LOG"
+  _tlogger_recover_orphans
 }
 
 tlogger_stop() {
@@ -349,6 +370,10 @@ tlogger_pty() {
         TLOGGER_PTY_CMDS+=("\$_c")
         _tlogger_pty_alias "\$_c"
         echo "[tlogger] \$_c is now captured through a pty"
+        # script(1) owns the pty, so Ctrl-Z stops inside it instead of
+        # handing the shell back. It matters most for a caught shell, where
+        # Ctrl-Z then "stty raw -echo; fg" is the usual upgrade.
+        echo "           note: Ctrl-Z will not suspend \$_c while it is captured"
       done
       _tlogger_persist_pty_cmds
       ;;
@@ -425,7 +450,9 @@ _tlogger_pty_run() {
     return \$?
   fi
   local _tlogger_tmp
-  _tlogger_tmp="\$(mktemp -t tlogger_pty.XXXXXX)" || {
+  # The pid is in the name so an interrupted capture can be identified and
+  # recovered later; see _tlogger_recover_orphans.
+  _tlogger_tmp="\$(mktemp -t tlogger_pty.\$\$.XXXXXX)" || {
     eval "\$_tlogger_real \\"\\\$@\\""
     return \$?
   }

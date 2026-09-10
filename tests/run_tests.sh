@@ -116,30 +116,52 @@ check        "the command's own output is kept" "REAL_OUTPUT"  "$LOG_HOOK"
 check_absent "the plugin's output is not"       "PLUGIN_NOISE" "$LOG_HOOK"
 
 echo
-echo "interactive commands keep their terminal"
+echo "wrapper prefixes are seen through"
+# A bare python3 is an interactive REPL and must be skipped so it keeps its
+# terminal - even reached through env, an absolute path or proxychains. If a
+# prefix were not stripped, the command would not be recognised, would be
+# captured, and stdin would no longer be a tty. Sending isatty into the REPL
+# is the probe.
 HOME_TTY="$WORK/tty"
 install_into "$HOME_TTY" 2 n
-PROBE="import sys; print('TTY' if sys.stdout.isatty() else 'PIPE')"
-drive "$HOME_TTY" "$WORK/tty.tty" \
-  "python3 -c \"$PROBE\"" "env -i PATH=/usr/bin:/bin python3 -c \"$PROBE\"" "/usr/bin/python3 -c \"$PROBE\""
-if [ "$(tr -d '\r' < "$WORK/tty.tty" | grep -ac '^PIPE$')" = 0 ]; then
-  pass "bare, env-wrapped and absolute paths all keep a tty"
-else
-  fail "bare, env-wrapped and absolute paths all keep a tty"
-fi
+ISATTY="import sys; print('ISATTY', sys.stdin.isatty())"
+drive "$HOME_TTY" "$WORK/tty.tty" "python3" "$ISATTY" "exit()"
+check "a bare REPL keeps its terminal" "ISATTY True" "$WORK/tty.tty"
 # a prefixed command must not print tlogger's own working variables
 check_absent "wrapper handling keeps its variables to itself" "_tlogger_" "$WORK/tty.tty"
+
+HOME_ENV="$WORK/tty_env"
+install_into "$HOME_ENV" 2 n
+drive "$HOME_ENV" "$WORK/env.tty" "env FOO=bar python3" "$ISATTY" "exit()"
+check "env-wrapped is recognised (keeps its terminal)" "ISATTY True" "$WORK/env.tty"
+
+HOME_ABS="$WORK/tty_abs"
+install_into "$HOME_ABS" 2 n
+drive "$HOME_ABS" "$WORK/abs.tty" "/usr/bin/python3" "$ISATTY" "exit()"
+check "an absolute path is recognised (keeps its terminal)" "ISATTY True" "$WORK/abs.tty"
 
 if command -v proxychains >/dev/null 2>&1; then
   HOME_PC="$WORK/proxychains"
   install_into "$HOME_PC" 2 n
-  drive "$HOME_PC" "$WORK/pc.tty" "proxychains -q python3 -c \"$PROBE\""
-  if [ "$(tr -d '\r' < "$WORK/pc.tty" | grep -ac '^PIPE$')" = 0 ]; then
-    pass "proxychains is seen through like any other wrapper"
-  else
-    fail "proxychains is seen through like any other wrapper"
-  fi
+  drive "$HOME_PC" "$WORK/pc.tty" "proxychains -q python3" "$ISATTY" "exit()"
+  check "proxychains is seen through like any other wrapper" "ISATTY True" "$WORK/pc.tty"
 fi
+
+echo
+echo "REPLs: scripted runs are logged, bare prompts are skipped"
+HOME_REPL="$WORK/repl"
+install_into "$HOME_REPL" 2 n
+echo 'print("POC_SCRIPT_RAN")' > "$WORK/poc.py"
+drive "$HOME_REPL" "$WORK/repl.tty" \
+  "python3 $WORK/poc.py" \
+  "python3 -c \"print('DASH_C_RAN')\"" \
+  "python3" "import sys; print('BARE', sys.stdin.isatty())" "exit()"
+LOG_REPL="$(newest_log "$HOME_REPL")"
+check "a python script's output is logged"   "POC_SCRIPT_RAN" "$LOG_REPL"
+check "python -c output is logged"           "DASH_C_RAN"     "$LOG_REPL"
+check_absent "a bare REPL is left alone"      "BARE True"     "$LOG_REPL"
+# the bare REPL must still get a real tty on screen
+check "the bare REPL keeps its terminal"     "BARE True"     "$WORK/repl.tty"
 
 echo
 echo "job control is left alone"

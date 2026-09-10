@@ -84,6 +84,8 @@ Anything on that list gets an alias routing it through `script`, so it keeps a r
 
 Editors and pagers are deliberately left in the skip list: capturing `vim` mostly records screen redraws, not content.
 
+**REPL tools are captured when they run something.** `python`, `ipython`, `mysql`, `psql`, `redis-cli`, `irb`, `pry`, `node` are a full-screen prompt when launched bare (skipped, so they keep their terminal), but `python3 exploit.py`, `python3 -m http.server`, `python3 -c '...'` and `mysql -e '...'` run and exit — their output is evidence, so those forms go into the log. The distinction is made from the arguments (a script, `-c`, `-m`, `-e`), and it holds through `sudo`, `env`, an absolute path and `proxychains`.
+
 The wrapper stands down by itself when it would get in the way — when logging is off, when the command is in a pipeline or has its input or output redirected, or when `script` isn't installed — and falls through to running the command untouched.
 
 ### Commands that format themselves differently when piped
@@ -115,7 +117,7 @@ $ tlogger_pty add ls
 ./tests/run_tests.sh
 ```
 
-67 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
+73 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
 
 They cover both install shapes, both modes, exit codes, UTF-8, notes, log permissions, stop, prompt-plugin isolation, wrapper prefixes and quoting, job control, binary output, one-log-per-terminal, an unwritable log directory, alias preservation and reloading, pty capture, interrupted-capture recovery, the installer's edge cases and uninstall. Set `TLOGGER_TEST_SETTLE` to give each command longer on a slow machine.
 

@@ -446,6 +446,7 @@ tlogger_capture_exit() {
     unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
   fi
   [[ -n "\${TLOGGER_ACTIVE:-}" ]] && exec >/dev/tty 2>&1
+  _tlogger_finish_output
   return 0
 }
 
@@ -462,6 +463,126 @@ _tlogger_clean_ansi() {
     -e '/^Script (started|done) on .*\\[.*\\]\$/d' \
     | tr -d '\\000-\\010\\013\\014\\016-\\037\\177' \
     | iconv -c -f UTF-8 -t UTF-8
+}
+
+# Give ordinary commands a tty on stdout without moving the command into
+# another shell/session. stdin and job control stay on the original tty.
+# fd 1 publishes the slave path/completion; fd 3 feeds the plain-text log.
+_tlogger_finish_output() {
+  setopt local_options no_err_exit unset
+  if [[ -n "\${TLOGGER_OUTPUT_FD:-}" ]]; then
+    local _done
+    # Normally EOF follows immediately. A background writer can keep the
+    # slave open: never wait indefinitely for it before drawing the prompt.
+    IFS= read -r -t 0.2 -u "\$TLOGGER_OUTPUT_FD" _done
+    exec {TLOGGER_OUTPUT_FD}<&-
+    unset TLOGGER_OUTPUT_FD
+  fi
+  return 0
+}
+
+_tlogger_output_pty() {
+  command python3 - <<'TLOGGER_PY'
+import errno
+import fcntl
+import os
+import pty
+import select
+import signal
+import termios
+import tty
+
+for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP):
+    signal.signal(sig, signal.SIG_IGN)
+master, slave = pty.openpty()
+terminal = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+tty.setraw(slave)  # Preserve bytes; the real terminal does newline handling.
+size = None
+
+def resize():
+    global size
+    current = fcntl.ioctl(terminal, termios.TIOCGWINSZ, b'\0' * 8)
+    if current != size:
+        fcntl.ioctl(master, termios.TIOCSWINSZ, current)
+        size = current
+
+def write_all(fd, data):
+    while data:
+        data = data[os.write(fd, data):]
+
+try:
+    resize()
+    write_all(1, (os.ttyname(slave) + '\n').encode())
+    # Wait for the shell to open the slave and send a private handshake byte.
+    # Keeping our slave open until then avoids an early EIO on the master.
+    if not select.select([master], [], [], 5)[0]:
+        raise SystemExit(1)
+    if os.read(master, 1) != b'\0':
+        raise SystemExit(1)
+    os.close(slave)
+    slave = -1
+    while True:
+        resize()
+        if not select.select([master], [], [], 0.1)[0]:
+            continue
+        try:
+            data = os.read(master, 65536)
+        except OSError as exc:
+            if exc.errno == errno.EIO:  # Last writer closed the slave.
+                break
+            raise
+        if not data:
+            break
+        write_all(terminal, data)
+        write_all(3, data)
+except (OSError, KeyboardInterrupt):
+    pass  # Terminal/consumer closed; do not print relay errors into a shell.
+finally:
+    if slave >= 0:
+        os.close(slave)
+    os.close(master)
+    os.close(terminal)
+    try:
+        write_all(1, b'done\n')
+    except OSError:
+        pass  # A background writer may outlive the shell's bounded wait.
+TLOGGER_PY
+}
+
+# Decide whether a REPL-style command is being launched interactively. Args
+# that run something (a script path, -c, -m for python; -e/--execute/--eval
+# for a database client) mean it runs and exits, so its output belongs in
+# the log; bare, or with only options, it is an interactive prompt to skip.
+_tlogger_repl_is_interactive() {
+  local _r="\$1"; shift
+  local _a
+  case "\$_r" in
+    python|python2|python3|ipython|node)
+      for _a in "\$@"; do
+        case "\$_a" in
+          -c|-m) return 1 ;;
+          -i) return 0 ;;
+          --) ;;
+          -*) ;;
+          *) return 1 ;;
+        esac
+      done
+      return 0 ;;
+    mysql|psql|mariadb|mongo|mongosh)
+      for _a in "\$@"; do
+        case "\$_a" in
+          -e|--execute|--eval|-e*) return 1 ;;
+        esac
+      done
+      return 0 ;;
+    redis-cli|irb|pry)
+      for _a in "\$@"; do
+        [[ "\$_a" == -e || "\$_a" == --eval ]] && return 1
+        [[ "\$_a" != -* ]] && return 1
+      done
+      return 0 ;;
+    *) return 0 ;;
+  esac
 }
 
 autoload -Uz add-zsh-hook
@@ -489,11 +610,19 @@ TLOGGER_INTERACTIVE_CMDS=(
   impacket-psexec impacket-smbexec impacket-wmiexec impacket-atexec
   impacket-dcomexec impacket-mssqlclient impacket-smbclient
   rlwrap gdb r2 radare2
-  mysql psql mongo redis-cli
-  python3 python python2 ipython
-  irb pry
   sqlmap
   nc ncat netcat pwncat
+)
+
+# REPL-style tools that are a full-screen prompt when launched bare, but run
+# and exit non-interactively when given a script/query/-c/-m/-e. Skipping
+# them unconditionally on the name alone drops the output that matters -
+# "python3 exploit.py", "python3 -m http.server", "mysql -e '...'". They are
+# skipped only when actually interactive; otherwise they go into the log.
+TLOGGER_REPL_CMDS=(
+  python3 python python2 ipython
+  mysql psql mariadb mongo mongosh redis-cli
+  irb pry node
 )
 
 
@@ -538,6 +667,7 @@ tlogger_stop() {
   unset TLOGGER_LAST_LOGGED TLOGGER_LAST_PIPED
   export TLOGGER_PAUSED=1
   exec >/dev/tty 2>&1
+  _tlogger_finish_output
   echo "[+] Logging stopped"
 }
 
@@ -731,9 +861,31 @@ tlogger_preexec() {
     for _tlogger_ic in \$TLOGGER_INTERACTIVE_CMDS \$TLOGGER_PTY_CMDS; do
       [[ "\$_tlogger_cmd" == "\$_tlogger_ic" ]] && return
     done
+    # A REPL is skipped only when launched as an interactive prompt; given a
+    # script or a one-shot query it falls through and its output is logged.
+    if (( \${TLOGGER_REPL_CMDS[(I)\$_tlogger_cmd]} )) \
+       && _tlogger_repl_is_interactive "\$_tlogger_cmd" "\${(@)_tlogger_words[2,-1]}"; then
+      return
+    fi
   fi
 
   TLOGGER_LAST_PIPED=1
+  # An output-only pty preserves automatic colour and foreground job control.
+  # Explicit command redirects/pipelines still override these descriptors.
+  local _tlogger_slave
+  if [[ "\${TLOGGER_COLOR:-1}" != 0 ]] && command -v python3 >/dev/null 2>&1 \
+     && exec {TLOGGER_OUTPUT_FD}< <(
+       # Detach the relay: zsh otherwise waits for this process substitution
+       # to finish before read returns, while the relay waits for our open.
+       _tlogger_output_pty 3> >( _tlogger_clean_ansi >> "\$TLOGGER_LOG" ) &!
+     ) && IFS= read -r -t 3 -u "\$TLOGGER_OUTPUT_FD" _tlogger_slave \
+     && [[ "\$_tlogger_slave" == /dev/pts/<-> ]]; then
+    if exec > "\$_tlogger_slave" 2>&1; then
+      printf '\\0'
+      return
+    fi
+  fi
+  _tlogger_finish_output
   exec > >(
     tee >( _tlogger_clean_ansi >> "\$TLOGGER_LOG" )
   ) 2>&1
@@ -791,4 +943,3 @@ case "$ACTION" in
   uninstall) uninstall ;;
   *) print_usage ;;
 esac
-

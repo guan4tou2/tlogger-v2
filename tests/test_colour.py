@@ -35,6 +35,11 @@ class Session:
         subprocess.run(["bash", str(installer), "install"],
                        input=f"1\n{pty_mode}\n", text=True, capture_output=True,
                        env=env, check=True)
+        generated = (self.root / ".zshrc").read_text()
+        # Validate the installed heredoc, since the installer expands it.
+        relay = generated.split("<<'TLOGGER_PY'\n", 1)[1].split("\nTLOGGER_PY\n", 1)[0]
+        compile(relay, str(self.root / ".zshrc") + ":relay", "exec")
+        subprocess.run(["/usr/bin/zsh", "-n", str(self.root / ".zshrc")], check=True)
         runner = self.root / "runner"
         runner.mkdir()
         (runner / ".zshrc").write_text(
@@ -64,14 +69,16 @@ class Session:
         return "\n".join(p.read_text() for p in (self.root / "Desktop/logs").glob("*.log"))
 
     def close(self):
-        self.cmd("stty -g > tty-after")
-        check("terminal settings restored", (self.root / "tty-before").read_bytes()
-              == (self.root / "tty-after").read_bytes())
-        self.cmd("tlogger_stop")
-        self.child.sendline("exit")
-        self.child.expect(pexpect.EOF)
-        self.child.close()
-        self.transcript.close()
+        try:
+            self.cmd("stty -g > tty-after")
+            check("terminal settings restored", (self.root / "tty-before").read_bytes()
+                  == (self.root / "tty-after").read_bytes())
+            self.cmd("tlogger_stop")
+            self.child.sendline("exit")
+            self.child.expect(pexpect.EOF)
+        finally:
+            self.child.close(force=True)
+            self.transcript.close()
 
 
 def check(name, passed):
@@ -147,6 +154,43 @@ def exercise(root, pty_mode):
         check("explicit legacy fallback", not SGR.search(session.cmd(commands["ls automatic colour"])))
         session.cmd("unset TLOGGER_COLOR")
         check("colour can be re-enabled", bool(SGR.search(session.cmd(commands["ls automatic colour"]))))
+        # Exercise output lifetime, not just isatty(): a background writer
+        # must not hold the next prompt hostage or lose its later bytes.
+        started = time.monotonic()
+        session.cmd("(sleep 1; printf 'BACKGROUND_%s\\n' FINISHED) &")
+        check("background job does not block prompt", time.monotonic() - started < 0.9)
+        session.cmd("sleep 1.2")
+        check("late background output reaches log", "BACKGROUND_FINISHED" in session.log().splitlines())
+        session.cmd("seq 1 5000")
+        numbers = [int(line) for line in session.log().splitlines() if line.isdecimal()]
+        check("large output is complete and ordered", numbers == list(range(1, 5001)))
+        (session.root / "binary.py").write_text("import sys; sys.stdout.buffer.write(bytes(range(256)))\n")
+        session.cmd("python3 binary.py > binary.out")
+        check("binary file redirection is byte-exact", (session.root / "binary.out").read_bytes() == bytes(range(256)))
+        session.cmd("print -l /proc/$$/fd/*(N) > fds-before")
+        for _ in range(12):
+            session.cmd(":")
+        session.cmd("print -l /proc/$$/fd/*(N) > fds-after")
+        check("relay descriptors are released", len((session.root / "fds-before").read_text().splitlines())
+              == len((session.root / "fds-after").read_text().splitlines()))
+        (session.root / "input.py").write_text(
+            "import getpass\n"
+            "answer = input('ENTER_NORMAL:')\n"
+            "secret = getpass.getpass('ENTER_SECRET:')\n"
+            "print('INPUT_OK' if answer == 'NORMAL_INPUT' and secret == 'QA_SECRET_NEVER_ECHO' else 'BAD_INPUT')\n")
+        session.cmd("stty echo")
+        session.child.sendline("python3 input.py")
+        session.child.expect_exact("ENTER_NORMAL:")
+        session.child.sendline("NORMAL_INPUT")
+        session.child.expect_exact("ENTER_SECRET:")
+        ordinary_input = session.child.before
+        session.child.sendline("QA_SECRET_NEVER_ECHO")
+        session.child.expect_exact(PROMPT)
+        response = session.child.before + session.drain()
+        session.cmd("stty -echo")
+        check("ordinary stdin and hidden password input work", "NORMAL_INPUT" in ordinary_input and "INPUT_OK" in response)
+        check("hidden input is absent from screen and log", "QA_SECRET_NEVER_ECHO" not in response
+              and "QA_SECRET_NEVER_ECHO" not in session.log())
     finally:
         session.close()
 

@@ -2,7 +2,7 @@
 
 A zsh terminal session logger built for OSCP / penetration testing exam documentation. Every command you run — with a timestamp, working directory, and your VPN (`tun0`) IP — gets written to a clean, timestamped log file, so you can rebuild your attack timeline when writing the report instead of relying on memory or screenshots.
 
-**Target environment: Kali Linux.** It assumes zsh, GNU sed, iproute2 (`ip`), and a `tun0` VPN interface — i.e. a stock Kali exam/lab box.
+**Target environment: Kali Linux.** It assumes zsh, Python 3 (standard library only), GNU sed, iproute2 (`ip`), and a `tun0` VPN interface — i.e. a stock Kali exam/lab box.
 
 **zsh only.** The logger is built on zsh's `precmd`/`preexec` hooks and zsh parameter expansion, and installs into `~/.zshrc`. It does not work under bash or sh — a bash port would need `PROMPT_COMMAND` and `trap DEBUG` and a rewrite of the array handling. Kali has defaulted to zsh since 2020, so this is usually already the case; the installer checks and tells you if it isn't.
 
@@ -88,22 +88,24 @@ Editors and pagers are deliberately left in the skip list: capturing `vim` mostl
 
 The wrapper stands down by itself when it would get in the way — when logging is off, when the command is in a pipeline or has its input or output redirected, or when `script` isn't installed — and falls through to running the command untouched.
 
-### Commands that format themselves differently when piped
+### Keeping terminal colours
 
-While logging is active, a captured command's stdout is a pipe rather than a terminal, so tools that check `isatty` change how they print: `ls` drops to a single column with no colour, `grep --color=auto` stops colourising, `git` skips its pager. The recorded *content* is complete either way — only the on-screen formatting differs.
+Ordinary recorded commands keep a terminal on stdout and stderr, including its window size. This preserves automatic colour in tools such as Kali's `ls` alias, `grep --color=auto`, and Git. The screen receives the original bytes; only the log copy has ANSI codes removed. Existing aliases, colour settings, and `NO_COLOR` are left alone: a tool that normally needs a colour flag still needs that flag.
 
-If that bothers you for a command you look at all day, put it on the pty list and the formatting comes back, log included:
+This relay uses Python 3 and keeps ordinary stdin and job control on the original terminal. Jobs can still use `Ctrl-Z`, `fg`, and `Ctrl-C`; they are not launched inside another shell. An implicit pager such as Git's `less` may open the output terminal for keyboard input: when it requests raw/cbreak mode, the relay forwards those keys and restores terminal settings on exit. Interactive tools retain their existing skip/capture policy.
 
-```console
-$ tlogger_pty add ls
-```
+Explicit redirection still produces ordinary files, and an upstream command in a pipeline still sees a pipe. For example, `ls --color=auto > files.txt` and `ls --color=auto | cat` do not gain unwanted colour codes.
+
+Set `TLOGGER_COLOR=0` to give commands pipe output instead, or `unset TLOGGER_COLOR` to restore terminal output. Both modes use the Python relay. If Python 3 or the relay is unavailable, recording pauses with a warning and the command runs directly on the terminal.
+
+The relay writes cleaned output before acknowledging the end of a foreground command, so its body is saved before the next command header. If log writes fail, recording pauses while screen output continues. `tlogger_stop` revokes recording for every relay from that recording session, including background jobs, without terminating those jobs or hiding their output. Starting again does not re-enable old relays. A private state file coordinates this and is removed on stop or normal shell exit. Asynchronous background output can still interleave with later commands while recording is active; redirect long-running jobs to their own output files when attribution matters.
 
 ## Design notes / known limitations
 
 - **SSH sessions are fully captured.** `ssh` runs under `script`, which gives it a real pty — the remote session renders normally on your screen *and* the whole transcript (remote prompt, commands, output) lands in the log. Passwords typed at an `ssh` password prompt are not captured, because terminal echo is off and only what's displayed gets recorded.
-- **Other interactive/TUI tools are not captured.** `vim`, `msfconsole`, `tmux`, `mysql`, etc. (see `TLOGGER_INTERACTIVE_CMDS`) bypass logging and run directly against the real terminal. The general logging mechanism uses `exec > >(tee ...)`, which does not allocate a pty, so curses/full-screen apps would render incorrectly or have their output buffered if captured that way. The header line and exit code are still logged; the session content is not. See "Recording more interactive tools" above if you want any of them captured.
-- **A captured command cannot be suspended with Ctrl-Z.** `script` owns the pty, so the stop signal is handled inside it and the shell is not handed back; the command still exits normally. This is why editors stay on the skip list, and it is worth remembering before putting a caught shell (`nc`, `socat`) on the pty list, where Ctrl-Z followed by `stty raw -echo; fg` is the usual way to upgrade the session. Commands run over `ssh` are unaffected — the remote shell handles suspension there.
-- **A capture is merged into the log when the command ends.** Close the terminal in the middle of one and the transcript is left in a temp file rather than the log. The next `tlogger_start` picks up anything left behind by a shell that is no longer running and appends it under a `### RECOVERED ###` marker, so it reaches the log one session late rather than never.
+- **Other interactive/TUI tools are not captured.** `vim`, `msfconsole`, `tmux`, and interactive database prompts bypass logging and run directly against the original terminal. The header line and exit code are still logged; the session content is not. Full-screen redraws do not make a useful plain-text transcript. See "Recording more interactive tools" above if you want any of them captured.
+- **Commands wrapped by `tlogger_pty` cannot be suspended back to the local shell with Ctrl-Z.** `script` owns their pty, so the stop signal is handled inside it and the local shell is not handed back. This restriction does not apply to the ordinary output relay or native skipped commands. Keep it in mind before putting `nc` on the `tlogger_pty` list: its `Ctrl-Z` then `stty raw -echo; fg` upgrade needs local job control. Commands run over `ssh` are unaffected — the remote shell handles suspension there.
+- **A `tlogger_pty` capture is merged into the log when the command ends.** Close the terminal in the middle of one and the transcript is left in a temp file rather than the log. The next `tlogger_start` picks up anything left behind by a shell that is no longer running and appends it under a `### RECOVERED ###` marker. Ordinary output capture streams through the cleaner instead of using this transcript-recovery path.
 - **Output from background jobs lands wherever it arrives.** The log is organised as one block per command, and a job started with `&` prints whenever it feels like it — usually under some later command's entry. The line is recorded, but its position in the file is not its position in time. Foreground work reads correctly; don't reconstruct a timeline from backgrounded output.
 - **A nested shell writes to the same log.** Running `zsh` inside a logged session inherits the session's log rather than opening its own. The parent is blocked while the child runs, so nothing interleaves, and the commands did happen in that terminal — but the file will not tell you a subshell was involved.
 - If the remote box you SSH into runs a heavily customized shell (autosuggestions, syntax highlighting, a multi-line prompt), its constant line redraws show up in the captured transcript as duplicated fragments. A plain `bash` prompt — which is what you usually land on after popping a shell — records cleanly.
@@ -122,6 +124,16 @@ $ tlogger_pty add ls
 73 checks. Each installs into a throwaway `HOME` and drives a real interactive zsh through a pty, because the hooks do not fire under `zsh -c` and a piped stdout hides exactly the behaviour worth testing. Run it on Linux; the cleaner relies on GNU sed. Your own configuration is never touched.
 
 They cover both install shapes, both modes, exit codes, UTF-8, notes, log permissions, stop, prompt-plugin isolation, wrapper prefixes and quoting, job control, binary output, one-log-per-terminal, an unwritable log directory, alias preservation and reloading, pty capture, interrupted-capture recovery, the installer's edge cases and uninstall. Set `TLOGGER_TEST_SETTLE` to give each command longer on a slow machine.
+
+Additional real-terminal checks (require Python's `pexpect`, included on the tested Kali installation):
+
+```bash
+python3 tests/test_colour.py
+python3 tests/test_kali_workflows.py
+python3 tests/test_relay_lifecycle.py
+```
+
+The colour suite compares screen escape codes with logging off/on, plain-text logs, terminal dimensions, redirects, pipelines, job control, background output and descriptor cleanup. The Kali suite uses disposable loopback services for Nmap, curl, ffuf, Gobuster, feroxbuster, Python HTTP transfers, the `nc` shell upgrade and a `socat` shell, plus Vim/less interaction. It requires those tools to be installed. The lifecycle suite exercises file-size write failures, stop/restart with background output, delayed log writes, split ANSI/UTF-8 output, background pager input, and simultaneous orphan recovery. All three scripts validate the installed relay's Python syntax and report their temporary evidence directory; none changes your shell configuration. These tests do not validate Windows authentication, AD sessions, or tools absent from the machine.
 
 ## License
 
